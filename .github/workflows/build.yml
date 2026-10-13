@@ -1,0 +1,39 @@
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build sitg
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        run: |
+          go build -trimpath -ldflags="-s -w" -o sitg ./cmd/sitg
+          ./sitg 2>&1 | head -1 || true
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: sitg-linux-amd64
+          path: sitg
+          if-no-files-found: error

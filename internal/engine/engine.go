@@ -1,0 +1,496 @@
+package engine
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"net/netip"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/jbemmel/sitg/internal/config"
+	"github.com/jbemmel/sitg/internal/link"
+	"github.com/jbemmel/sitg/internal/pattern"
+	"github.com/jbemmel/sitg/internal/wire"
+)
+
+// Engine runs a send or recv session.
+type Engine struct {
+	cfg    *config.Config
+	sock   *link.Socket
+	ep     *link.Endpoint
+	stats  *Stats
+	paths  []netip.Addr
+	dstMAC map[netip.Addr]net.HardwareAddr
+	sel    *pattern.Selector
+}
+
+func New(cfg *config.Config, sock *link.Socket) (*Engine, error) {
+	ep := sock.Endpoint()
+	e := &Engine{
+		cfg:    cfg,
+		sock:   sock,
+		ep:     ep,
+		stats:  NewStats(string(cfg.Role)),
+		dstMAC: make(map[netip.Addr]net.HardwareAddr),
+		sel:    pattern.New(cfg),
+	}
+	if cfg.Entropy == config.EntropySRv6 {
+		paths, err := wire.AllPaths(wire.PathParams{
+			Locator:  cfg.Locator,
+			Paths:    cfg.Paths,
+			Hops:     cfg.Hops,
+			Radix:    cfg.Radix,
+			USIDBase: cfg.USIDBase,
+		})
+		if err != nil {
+			return nil, err
+		}
+		e.paths = paths
+	}
+	return e, nil
+}
+
+func (e *Engine) Run() error {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if e.cfg.Role == config.RoleSend {
+		return e.runSend(ctx)
+	}
+	return e.runRecv(ctx)
+}
+
+func (e *Engine) resolveMAC(ip netip.Addr) (net.HardwareAddr, error) {
+	if mac, ok := e.dstMAC[ip]; ok {
+		return mac, nil
+	}
+	if e.cfg.DstMAC != nil {
+		e.dstMAC[ip] = e.cfg.DstMAC
+		return e.cfg.DstMAC, nil
+	}
+	mac, err := link.LookupNeighborMAC(ip)
+	if err != nil {
+		return nil, fmt.Errorf("resolve MAC for %s: %w (pass --dst-mac)", ip, err)
+	}
+	e.dstMAC[ip] = mac
+	return mac, nil
+}
+
+func (e *Engine) srcIP() (netip.Addr, error) {
+	if e.cfg.IsIPv4() {
+		if !e.ep.SrcIPv4.IsValid() {
+			return netip.Addr{}, fmt.Errorf("interface %s has no IPv4 address", e.cfg.Iface)
+		}
+		return e.ep.SrcIPv4, nil
+	}
+	if !e.ep.SrcIPv6.IsValid() {
+		return netip.Addr{}, fmt.Errorf("interface %s has no IPv6 address", e.cfg.Iface)
+	}
+	return e.ep.SrcIPv6, nil
+}
+
+func (e *Engine) buildOpts(dst netip.Addr, entropy uint16, pathIdx int) (wire.BuildOpts, error) {
+	src, err := e.srcIP()
+	if err != nil {
+		return wire.BuildOpts{}, err
+	}
+	mac, err := e.resolveMAC(dst)
+	if err != nil {
+		return wire.BuildOpts{}, err
+	}
+	opts := wire.BuildOpts{
+		SrcMAC:   e.ep.SrcMAC,
+		DstMAC:   mac,
+		SrcIP:    src,
+		DstIP:    dst,
+		Encap:    string(e.cfg.Encap),
+		IPProto:  e.cfg.IPProto,
+		Entropy:  entropy,
+		HopLimit: 64,
+	}
+	if e.cfg.Entropy == config.EntropySRv6 && len(e.paths) > 0 {
+		opts.UseSRv6 = true
+		opts.SRv6Dst = e.paths[pathIdx%len(e.paths)]
+		if e.ep.SrcIPv6.IsValid() {
+			opts.SRv6SrcIP = e.ep.SrcIPv6
+		} else if src.Is6() {
+			opts.SRv6SrcIP = src
+		} else {
+			return wire.BuildOpts{}, fmt.Errorf("SRv6 requires an IPv6 address on %s", e.cfg.Iface)
+		}
+	}
+	return opts, nil
+}
+
+func (e *Engine) encodeData(psn, msgID, offset, length uint32, rtx bool, payload []byte) []byte {
+	if e.cfg.Proto == config.ProtoMRC {
+		return wire.EncodeMRCData(psn, e.cfg.QP, msgID, offset, length, rtx, payload)
+	}
+	return wire.EncodeUETData(psn, e.cfg.QP, msgID, offset, length, rtx, payload)
+}
+
+func (e *Engine) encodeSACK(cumAck uint32, bitmap uint64) []byte {
+	if e.cfg.Proto == config.ProtoMRC {
+		return wire.EncodeMRCSACK(e.cfg.QP, cumAck, bitmap)
+	}
+	return wire.EncodeUETSACK(e.cfg.QP, cumAck, bitmap)
+}
+
+func (e *Engine) buildFrame(opts wire.BuildOpts, transport []byte) ([]byte, error) {
+	if e.cfg.Proto == config.ProtoMRC {
+		return wire.BuildMRCFrame(opts, transport)
+	}
+	return wire.BuildUETFrame(opts, transport)
+}
+
+func (e *Engine) runSend(ctx context.Context) error {
+	win := NewSendWindow(e.cfg.Window, e.cfg.RTO)
+	deadline := time.Now().Add(e.cfg.Duration)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	rtoTicker := time.NewTicker(e.cfg.RTO / 2)
+	if e.cfg.RTO/2 < time.Microsecond {
+		rtoTicker.Reset(time.Millisecond)
+	}
+	defer rtoTicker.Stop()
+
+	recvBuf := make([]byte, 65536)
+	_ = e.sock.SetNonblock(true)
+
+	pathIdx := 0
+	entropyBase := uint16(10000)
+	msgID := uint32(1)
+	payloadScratch := make([]byte, e.cfg.PktSize)
+	for i := range payloadScratch {
+		payloadScratch[i] = byte(i)
+	}
+
+	tokens := float64(e.cfg.RateBps)
+	lastRefill := time.Now()
+	draining := false
+
+	var (
+		curDst     netip.Addr
+		curMsgSize int
+		curOffset  int
+		haveMsg    bool
+	)
+
+	progress := func() {
+		fmt.Fprintln(os.Stderr, e.stats.ProgressLine())
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			e.stats.MarkEnd()
+			fmt.Fprint(os.Stderr, e.stats.FinalReport())
+			return nil
+		case <-ticker.C:
+			progress()
+		case <-rtoTicker.C:
+			if pkt := win.OldestExpired(time.Now()); pkt != nil {
+				if err := e.retransmit(pkt, &pathIdx, entropyBase, win); err != nil {
+					return err
+				}
+			}
+		default:
+		}
+
+		// Receive SACKs
+		for {
+			n, err := e.sock.Recv(recvBuf)
+			if err != nil {
+				if isTimeout(err) || isWouldBlock(err) {
+					break
+				}
+				return err
+			}
+			f, err := wire.ParseEthernetFrame(recvBuf[:n], e.cfg.IPProto)
+			if err != nil || f.Type != wire.TypeSACK || f.QP != e.cfg.QP {
+				continue
+			}
+			e.stats.MarkStart()
+			e.stats.SACKsRecv.Add(1)
+			acked, _, rtt := win.ApplySACK(f.CumAck, f.Bitmap, time.Now())
+			e.stats.BytesAcked.Add(acked)
+			if rtt > 0 && rtt < time.Second {
+				e.stats.ObserveRTT(rtt)
+			}
+		}
+
+		now := time.Now()
+		elapsed := now.Sub(lastRefill).Seconds()
+		if elapsed > 0 {
+			tokens += elapsed * float64(e.cfg.RateBps)
+			maxBurst := float64(e.cfg.RateBps) * 0.01
+			if tokens > maxBurst {
+				tokens = maxBurst
+			}
+			lastRefill = now
+		}
+
+		if !draining && now.After(deadline) {
+			draining = true
+		}
+		if draining {
+			if win.Empty() {
+				e.stats.MarkEnd()
+				progress()
+				fmt.Fprint(os.Stderr, e.stats.FinalReport())
+				return nil
+			}
+			time.Sleep(100 * time.Microsecond)
+			continue
+		}
+
+		if !haveMsg {
+			curDst, curMsgSize = e.sel.Next()
+			curOffset = 0
+			haveMsg = true
+		}
+
+		if !win.CanSend() || tokens < float64(e.cfg.PktSize*8) {
+			time.Sleep(10 * time.Microsecond)
+			continue
+		}
+
+		for curOffset < curMsgSize {
+			if !win.CanSend() || tokens < float64(e.cfg.PktSize*8) {
+				break
+			}
+			if time.Now().After(deadline) {
+				draining = true
+				break
+			}
+			chunk := e.cfg.PktSize
+			if curOffset+chunk > curMsgSize {
+				chunk = curMsgSize - curOffset
+			}
+			psn := win.NextPSN()
+			payload := payloadScratch[:chunk]
+			transport := e.encodeData(psn, msgID, uint32(curOffset), uint32(curMsgSize), false, payload)
+			entropy := entropyBase + uint16(pathIdx%e.cfg.Paths)
+			opts, err := e.buildOpts(curDst, entropy, pathIdx)
+			if err != nil {
+				return err
+			}
+			frame, err := e.buildFrame(opts, transport)
+			if err != nil {
+				return err
+			}
+			e.stats.MarkStart()
+			if err := e.sock.Send(frame); err != nil {
+				return err
+			}
+			win.Track(&Inflight{
+				PSN:       psn,
+				Payload:   append([]byte(nil), payload...),
+				MsgID:     msgID,
+				Offset:    uint32(curOffset),
+				Length:    uint32(curMsgSize),
+				SentAt:    time.Now(),
+				Bytes:     chunk,
+				PathIndex: pathIdx,
+				DstIP:     curDst.String(),
+			})
+			e.stats.PacketsSent.Add(1)
+			e.stats.BytesSent.Add(uint64(chunk))
+			tokens -= float64(len(frame) * 8)
+			pathIdx++
+			curOffset += chunk
+		}
+		if curOffset >= curMsgSize {
+			haveMsg = false
+			msgID++
+		}
+	}
+}
+
+func (e *Engine) retransmit(pkt *Inflight, pathIdx *int, entropyBase uint16, win *SendWindow) error {
+	*pathIdx++
+	dst := e.cfg.Dst
+	if pkt.DstIP != "" {
+		if addr, err := netip.ParseAddr(pkt.DstIP); err == nil {
+			dst = addr
+		}
+	}
+	if !dst.IsValid() {
+		peers := e.sel.Peers()
+		if len(peers) == 0 {
+			return fmt.Errorf("retransmit: no destination")
+		}
+		dst = peers[0]
+	}
+	entropy := entropyBase + uint16(*pathIdx%e.cfg.Paths)
+	opts, err := e.buildOpts(dst, entropy, *pathIdx)
+	if err != nil {
+		return err
+	}
+	transport := e.encodeData(pkt.PSN, pkt.MsgID, pkt.Offset, pkt.Length, true, pkt.Payload)
+	frame, err := e.buildFrame(opts, transport)
+	if err != nil {
+		return err
+	}
+	if err := e.sock.Send(frame); err != nil {
+		return err
+	}
+	win.MarkRetransmit(pkt.PSN, time.Now())
+	e.stats.PacketsSent.Add(1)
+	e.stats.Retransmits.Add(1)
+	e.stats.BytesSent.Add(uint64(pkt.Bytes))
+	return nil
+}
+
+func (e *Engine) runRecv(ctx context.Context) error {
+	tracker := NewRecvTracker()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	sackTimer := time.NewTicker(500 * time.Microsecond)
+	defer sackTimer.Stop()
+
+	recvBuf := make([]byte, 65536)
+	_ = e.sock.SetNonblock(true)
+
+	pktsSinceSACK := 0
+	var lastSrc netip.Addr
+	var lastEntropy uint16
+	var lastMAC net.HardwareAddr
+
+	var deadline <-chan time.Time
+	if e.cfg.Duration > 0 {
+		t := time.NewTimer(e.cfg.Duration)
+		defer t.Stop()
+		deadline = t.C
+	}
+
+	var sendSACKFn func() error
+	finish := func() error {
+		_ = sendSACKFn()
+		e.stats.MarkEnd()
+		fmt.Fprintln(os.Stderr, e.stats.ProgressLine())
+		fmt.Fprint(os.Stderr, e.stats.FinalReport())
+		return nil
+	}
+
+	sendSACKFn = func() error {
+		cum, bm, gaps := tracker.Snapshot()
+		e.stats.GapsOpen.Store(uint64(gaps))
+		if !lastSrc.IsValid() {
+			return nil
+		}
+		transport := e.encodeSACK(cum, bm)
+		src, err := e.srcIP()
+		if err != nil {
+			return err
+		}
+		mac := lastMAC
+		if mac == nil {
+			mac, err = e.resolveMAC(lastSrc)
+			if err != nil {
+				return err
+			}
+		}
+		opts := wire.BuildOpts{
+			SrcMAC:   e.ep.SrcMAC,
+			DstMAC:   mac,
+			SrcIP:    src,
+			DstIP:    lastSrc,
+			Encap:    string(e.cfg.Encap),
+			IPProto:  e.cfg.IPProto,
+			Entropy:  lastEntropy,
+			HopLimit: 64,
+		}
+		frame, err := e.buildFrame(opts, transport)
+		if err != nil {
+			return err
+		}
+		if err := e.sock.Send(frame); err != nil {
+			return err
+		}
+		e.stats.SACKsSent.Add(1)
+		pktsSinceSACK = 0
+		return nil
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return finish()
+		case <-deadline:
+			return finish()
+		case <-ticker.C:
+			fmt.Fprintln(os.Stderr, e.stats.ProgressLine())
+		case <-sackTimer.C:
+			if pktsSinceSACK > 0 {
+				if err := sendSACKFn(); err != nil {
+					return err
+				}
+			}
+		default:
+		}
+
+		n, err := e.sock.Recv(recvBuf)
+		if err != nil {
+			if isTimeout(err) || isWouldBlock(err) {
+				time.Sleep(10 * time.Microsecond)
+				continue
+			}
+			return err
+		}
+		f, err := wire.ParseEthernetFrame(recvBuf[:n], e.cfg.IPProto)
+		if err != nil || f.Type != wire.TypeData {
+			continue
+		}
+		if f.QP != e.cfg.QP {
+			continue
+		}
+		if e.cfg.Proto == config.ProtoUET && f.Proto != "uet" {
+			continue
+		}
+		if e.cfg.Proto == config.ProtoMRC && f.Proto != "mrc" {
+			continue
+		}
+
+		e.stats.MarkStart()
+		e.stats.PacketsRecv.Add(1)
+		if f.RTX {
+			e.stats.RTXFlagged.Add(1)
+		}
+		dup, _, _ := tracker.Observe(f.PSN)
+		if dup {
+			e.stats.Duplicates.Add(1)
+		} else {
+			e.stats.BytesUnique.Add(uint64(len(f.Payload)))
+		}
+		lastSrc = f.SrcIP
+		lastEntropy = f.Entropy
+		lastMAC = f.SrcMAC
+		pktsSinceSACK++
+		if pktsSinceSACK >= e.cfg.SackEvery {
+			if err := sendSACKFn(); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func isWouldBlock(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errno, ok := err.(syscall.Errno); ok {
+		return errno == syscall.EAGAIN || errno == syscall.EWOULDBLOCK
+	}
+	return false
+}
+
+func isTimeout(err error) bool {
+	if ne, ok := err.(net.Error); ok {
+		return ne.Timeout()
+	}
+	return false
+}
