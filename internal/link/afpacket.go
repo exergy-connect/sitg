@@ -3,11 +3,9 @@
 package link
 
 import (
-	"encoding/binary"
 	"fmt"
 	"net"
 	"net/netip"
-	"os"
 	"syscall"
 	"unsafe"
 
@@ -16,17 +14,17 @@ import (
 
 // Endpoint holds resolved interface addressing.
 type Endpoint struct {
-	Iface    *net.Interface
-	SrcMAC   net.HardwareAddr
-	SrcIPv4  netip.Addr
-	SrcIPv6  netip.Addr
-	Index    int
+	Iface   *net.Interface
+	SrcMAC  net.HardwareAddr
+	SrcIPv4 netip.Addr
+	SrcIPv6 netip.Addr
+	Index   int
 }
 
 // Socket is an AF_PACKET raw socket bound to an interface.
 type Socket struct {
-	fd  int
-	ep  *Endpoint
+	fd int
+	ep *Endpoint
 }
 
 // ResolveEndpoint looks up the interface and its addresses.
@@ -138,160 +136,6 @@ func (s *Socket) SetNonblock(nonblock bool) error {
 
 func (s *Socket) FD() int { return s.fd }
 
-// LookupNeighborMAC reads /proc/net/arp or /proc/net/ipv6_neigh-style via netlink-less heuristic:
-// for IPv4 uses /proc/net/arp; for IPv6 scans /sys and neigh via ip neigh file if present.
-func LookupNeighborMAC(ip netip.Addr) (net.HardwareAddr, error) {
-	if ip.Is4() {
-		return lookupIPv4ARP(ip)
-	}
-	return lookupIPv6Neigh(ip)
-}
-
-func lookupIPv4ARP(ip netip.Addr) (net.HardwareAddr, error) {
-	data, err := os.ReadFile("/proc/net/arp")
-	if err != nil {
-		return nil, err
-	}
-	want := ip.String()
-	lines := splitLines(data)
-	for i, line := range lines {
-		if i == 0 {
-			continue
-		}
-		fields := fieldsWS(line)
-		if len(fields) < 4 {
-			continue
-		}
-		if fields[0] == want && fields[3] != "00:00:00:00:00:00" {
-			mac, err := net.ParseMAC(fields[3])
-			if err != nil {
-				continue
-			}
-			return mac, nil
-		}
-	}
-	return nil, fmt.Errorf("no ARP entry for %s", ip)
-}
-
-func lookupIPv6Neigh(ip netip.Addr) (net.HardwareAddr, error) {
-	// Parse `ip -6 neigh` is not available without exec; use netlink GETNEIGH via raw syscall.
-	mac, err := netlinkGetNeigh(ip)
-	if err != nil {
-		return nil, fmt.Errorf("no neighbor for %s: %w", ip, err)
-	}
-	return mac, nil
-}
-
-func netlinkGetNeigh(ip netip.Addr) (net.HardwareAddr, error) {
-	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW, unix.NETLINK_ROUTE)
-	if err != nil {
-		return nil, err
-	}
-	defer unix.Close(fd)
-
-	sa := &unix.SockaddrNetlink{Family: unix.AF_NETLINK}
-	if err := unix.Bind(fd, sa); err != nil {
-		return nil, err
-	}
-
-	var family byte = unix.AF_INET6
-	addrBytes := ip.AsSlice()
-	if ip.Is4() {
-		family = unix.AF_INET
-	}
-
-	const (
-		NDA_DST = 1
-		NDA_LLADDR = 2
-		NLM_F_REQUEST = 0x1
-		NLM_F_DUMP = 0x300
-		RTM_GETNEIGH = 30
-	)
-
-	// ndmsg
-	ndmsg := make([]byte, 12)
-	ndmsg[0] = family
-
-	attr := make([]byte, 4+len(addrBytes))
-	binary.LittleEndian.PutUint16(attr[0:2], uint16(len(attr)))
-	binary.LittleEndian.PutUint16(attr[2:4], NDA_DST)
-	copy(attr[4:], addrBytes)
-	// align to 4
-	pad := (4 - (len(attr) % 4)) % 4
-	attr = append(attr, make([]byte, pad)...)
-
-	payload := append(ndmsg, attr...)
-	nlmsgLen := 16 + len(payload)
-	msg := make([]byte, nlmsgLen)
-	binary.LittleEndian.PutUint32(msg[0:4], uint32(nlmsgLen))
-	binary.LittleEndian.PutUint16(msg[4:6], RTM_GETNEIGH)
-	binary.LittleEndian.PutUint16(msg[6:8], NLM_F_REQUEST|NLM_F_DUMP)
-	binary.LittleEndian.PutUint32(msg[8:12], 1) // seq
-	copy(msg[16:], payload)
-
-	if _, err := unix.Write(fd, msg); err != nil {
-		return nil, err
-	}
-
-	buf := make([]byte, 8192)
-	for {
-		n, err := unix.Read(fd, buf)
-		if err != nil {
-			return nil, err
-		}
-		off := 0
-		for off+16 <= n {
-			mlen := int(binary.LittleEndian.Uint32(buf[off : off+4]))
-			mtype := binary.LittleEndian.Uint16(buf[off+4 : off+6])
-			if mlen < 16 || off+mlen > n {
-				break
-			}
-			if mtype == unix.NLMSG_DONE {
-				return nil, fmt.Errorf("not found")
-			}
-			if mtype == unix.NLMSG_ERROR {
-				return nil, fmt.Errorf("netlink error")
-			}
-			if mtype == RTM_GETNEIGH+1 { // RTM_NEWNEIGH = 28, dump returns NEWNEIGH
-				// actually RTM_NEWNEIGH is 28
-			}
-			const RTM_NEWNEIGH = 28
-			if mtype == RTM_NEWNEIGH {
-				body := buf[off+16 : off+mlen]
-				if len(body) < 12 {
-					off += (mlen + 3) & ^3
-					continue
-				}
-				attrs := body[12:]
-				var dst netip.Addr
-				var lladdr net.HardwareAddr
-				aoff := 0
-				for aoff+4 <= len(attrs) {
-					alen := int(binary.LittleEndian.Uint16(attrs[aoff : aoff+2]))
-					atype := binary.LittleEndian.Uint16(attrs[aoff+2 : aoff+4])
-					if alen < 4 || aoff+alen > len(attrs) {
-						break
-					}
-					aval := attrs[aoff+4 : aoff+alen]
-					switch atype {
-					case NDA_DST:
-						if addr, ok := netip.AddrFromSlice(aval); ok {
-							dst = addr.Unmap()
-						}
-					case NDA_LLADDR:
-						lladdr = append(net.HardwareAddr(nil), aval...)
-					}
-					aoff += (alen + 3) & ^3
-				}
-				if dst == ip && len(lladdr) >= 6 {
-					return lladdr[:6], nil
-				}
-			}
-			off += (mlen + 3) & ^3
-		}
-	}
-}
-
 func attachFilter(fd int, ipProto uint8) error {
 	// Classic BPF: accept IPv4/IPv6 UDP ports 4791/4793, or IP proto == ipProto.
 	// Filter at Ethernet level.
@@ -362,39 +206,4 @@ func attachFilter(fd int, ipProto uint8) error {
 
 func htons(v uint16) uint16 {
 	return (v << 8) | (v >> 8)
-}
-
-func splitLines(b []byte) []string {
-	var lines []string
-	start := 0
-	for i, c := range b {
-		if c == '\n' {
-			lines = append(lines, string(b[start:i]))
-			start = i + 1
-		}
-	}
-	if start < len(b) {
-		lines = append(lines, string(b[start:]))
-	}
-	return lines
-}
-
-func fieldsWS(s string) []string {
-	var out []string
-	field := make([]byte, 0, 32)
-	flush := func() {
-		if len(field) > 0 {
-			out = append(out, string(field))
-			field = field[:0]
-		}
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] == ' ' || s[i] == '\t' {
-			flush()
-			continue
-		}
-		field = append(field, s[i])
-	}
-	flush()
-	return out
 }

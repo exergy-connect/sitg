@@ -67,6 +67,9 @@ func (e *Engine) runFalconSend(ctx context.Context) error {
 	if len(conns) == 0 {
 		return fmt.Errorf("Falcon has no peers")
 	}
+	if err := e.prepareMACs(); err != nil {
+		return err
+	}
 	defer e.finishStats()
 	deadline := time.Now().Add(e.cfg.Duration)
 	progress := time.NewTicker(time.Second)

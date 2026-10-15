@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"time"
 )
 
 type Endpoint struct {
@@ -35,6 +36,6 @@ func (s *Socket) Recv(buf []byte) (int, error)    { return 0, fmt.Errorf("unsupp
 func (s *Socket) SetNonblock(nonblock bool) error { return nil }
 func (s *Socket) FD() int                         { return -1 }
 
-func LookupNeighborMAC(ip netip.Addr) (net.HardwareAddr, error) {
+func ResolveDestinationMAC(ep *Endpoint, ip netip.Addr, timeout time.Duration) (net.HardwareAddr, error) {
 	return nil, fmt.Errorf("unsupported")
 }

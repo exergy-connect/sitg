@@ -93,7 +93,7 @@ func Parse(args []string) (*Config, error) {
 	encap := fs.String("encap", "udp6", "encapsulation: udp6|udp4|ip6|ip4|all (all: receiver only)")
 	ipProto := fs.Int("ip-proto", 253, "IP protocol / next-header for native UET")
 	dst := fs.String("dst", "", "destination IP address")
-	dstMAC := fs.String("dst-mac", "", "destination MAC (optional if neighbor known)")
+	dstMAC := fs.String("dst-mac", "", "next-hop MAC override (default: automatic route and ARP/NDP discovery)")
 	pattern := fs.String("pattern", "p2p", "pattern: p2p|elephant|mice|outcast|alltoall")
 	peers := fs.String("peers", "", "comma-separated peer IPs for outcast/alltoall")
 	msgSize := fs.String("msg-size", "32KiB", "message size")

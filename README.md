@@ -10,7 +10,7 @@ Headers are a recognizable subset of UET, MRC, and Falcon for lab and fabric tes
 - Go 1.26+ (see `go.mod`)
 - `CAP_NET_RAW` (or root) to open raw sockets
 - An IPv4 or IPv6 address on `--iface` matching the chosen encapsulation
-- Destination MAC via `--dst-mac`, or a resolved neighbor entry
+- The kernel routing table must provide a route on `--iface`; SITG resolves the next-hop MAC automatically with ARP/NDP.
 
 ## Build
 
@@ -31,7 +31,7 @@ sudo ./sitg --role recv --iface eth0 --proto uet --encap udp6 --qp 1 --duration 
 
 # Sender
 sudo ./sitg --role send --iface eth0 --proto uet --encap udp6 \
-  --dst 2001:db8::2 --dst-mac aa:bb:cc:dd:ee:ff \
+  --dst 2001:db8::2 \
   --qp 1 --rate 10Gbps --duration 10s
 ```
 
@@ -76,7 +76,7 @@ beyond those limits are rejected or ignored. UET/MRC flow state remains until ex
 | `--encap` | `udp6` | Encapsulation; `all` for receivers (implicit with `--proto all`) |
 | `--ip-proto` | `253` | IPv4 protocol / IPv6 next-header for native UET |
 | `--dst` | | Destination IP (sender; required for most patterns) |
-| `--dst-mac` | | Destination MAC (optional if neighbor is known) |
+| `--dst-mac` | *(automatic)* | Optional next-hop MAC override; otherwise use kernel routing and ARP/NDP |
 | `--pattern` | `p2p` | Traffic pattern (see below) |
 | `--peers` | | Comma-separated peer IPs for `outcast` / `alltoall` |
 | `--msg-size` | `32KiB` | Message size (`KiB`/`MiB`/`KB`/`MB`/`K`/`M` suffixes) |
@@ -134,7 +134,7 @@ MRC and Falcon require `udp6` or `udp4`.
 sudo ./sitg --role recv --iface eth0 --proto uet --encap udp6 --qp 1 --duration 30s
 
 sudo ./sitg --role send --iface eth0 --proto uet --encap udp6 \
-  --dst 2001:db8::10 --dst-mac 02:00:00:00:00:10 \
+  --dst 2001:db8::10 \
   --pattern p2p --msg-size 1MiB --pkt-size 4096 --rate 100Gbps --duration 30s --qp 1
 ```
 
@@ -144,7 +144,7 @@ sudo ./sitg --role send --iface eth0 --proto uet --encap udp6 \
 sudo ./sitg --role recv --iface eth0 --proto mrc --encap udp6 --qp 7 --duration 60s
 
 sudo ./sitg --role send --iface eth0 --proto mrc --encap udp6 \
-  --dst 2001:db8::20 --dst-mac 02:00:00:00:00:20 \
+  --dst 2001:db8::20 \
   --pattern elephant --rate 200Gbps --window 512 --rto 2ms --qp 7 --duration 60s
 ```
 
@@ -153,7 +153,7 @@ sudo ./sitg --role send --iface eth0 --proto mrc --encap udp6 \
 ```bash
 sudo ./sitg --role recv --iface eth0 --proto falcon --encap udp6 --qp 7 --duration 60s
 sudo ./sitg --role send --iface eth0 --proto falcon --encap udp6 \
-  --dst 2001:db8::20 --dst-mac 02:00:00:00:00:20 --qp 7 --duration 30s
+  --dst 2001:db8::20 --qp 7 --duration 30s
 ```
 
 Falcon uses the v1.1 Push Data base header and request length, and BACK/EACK
@@ -200,7 +200,7 @@ request-window and congestion metadata remain zero.
 sudo ./sitg --role recv --iface eth0 --proto uet --encap ip6 --ip-proto 253 --qp 1 --duration 30s
 
 sudo ./sitg --role send --iface eth0 --proto uet --encap ip6 --ip-proto 253 \
-  --dst 2001:db8::30 --dst-mac 02:00:00:00:00:30 \
+  --dst 2001:db8::30 \
   --rate 40Gbps --duration 30s --qp 1
 ```
 
@@ -211,7 +211,7 @@ sudo ./sitg --role recv --iface eth0 --proto uet --encap udp6 \
   --entropy srv6 --locator fc00:: --paths 128 --hops 3 --radix 32 --qp 1 --duration 60s
 
 sudo ./sitg --role send --iface eth0 --proto uet --encap udp6 \
-  --dst 2001:db8::40 --dst-mac 02:00:00:00:00:40 \
+  --dst 2001:db8::40 \
   --entropy srv6 --locator fc00:: --paths 128 --hops 3 --radix 32 --usid-base 0x0100 \
   --rate 100Gbps --duration 60s --qp 1
 ```
@@ -226,7 +226,7 @@ sudo ./sitg --role recv --iface eth0 --proto uet --encap udp6 --qp 1 --window 10
 
 # Several senders (same dst, same qp)
 sudo ./sitg --role send --iface eth0 --proto uet --encap udp6 \
-  --dst 2001:db8::1 --dst-mac ... --qp 1 --rate 25Gbps --duration 120s
+  --dst 2001:db8::1 --qp 1 --rate 25Gbps --duration 120s
 ```
 
 ### Outcast / all-to-all from one sender
@@ -235,22 +235,22 @@ sudo ./sitg --role send --iface eth0 --proto uet --encap udp6 \
 sudo ./sitg --role send --iface eth0 --proto uet --encap udp6 \
   --pattern outcast \
   --peers 2001:db8::2,2001:db8::3,2001:db8::4 \
-  --dst-mac 02:00:00:00:00:02 \
+  \
   --rate 50Gbps --duration 30s --qp 1
 ```
 
-Run a matching `--role recv` on each peer (same `--qp`, or distinct QPs per peer if isolating sessions). When peers do not share one L2 adjacency, set neighbor entries or run separate senders with per-destination `--dst-mac`.
+Run a matching `--role recv` on each peer (same `--qp`, or distinct QPs per peer if isolating sessions). Each peer uses its own route and next-hop neighbor on `--iface`; no MAC arguments or prepopulated neighbor entries are required.
 
 ### Mice vs elephant mix
 
 ```bash
 # Short messages
 sudo ./sitg --role send --iface eth0 --proto uet --encap udp6 \
-  --dst 2001:db8::2 --dst-mac ... --pattern mice --rate 5Gbps --qp 1 --duration 30s
+  --dst 2001:db8::2 --pattern mice --rate 5Gbps --qp 1 --duration 30s
 
 # Bulk transfers
 sudo ./sitg --role send --iface eth0 --proto uet --encap udp6 \
-  --dst 2001:db8::2 --dst-mac ... --pattern elephant --msg-size 16MiB --rate 50Gbps --qp 2 --duration 30s
+  --dst 2001:db8::2 --pattern elephant --msg-size 16MiB --rate 50Gbps --qp 2 --duration 30s
 ```
 
 Use different `--qp` values so sessions stay independent on a shared receiver (receivers currently filter on one `--qp` per process—start one recv per QP if needed).
@@ -261,10 +261,17 @@ Use different `--qp` values so sessions stay independent on a shared receiver (r
 sudo ./sitg --role recv --iface lo --proto uet --encap udp6 --qp 1 --duration 5s
 
 sudo ./sitg --role send --iface lo --proto uet --encap udp6 \
-  --dst ::1 --dst-mac 00:00:00:00:00:00 --qp 1 --rate 50Mbps --duration 2s
+  --dst ::1 --qp 1 --rate 50Mbps --duration 2s
 ```
 
 Loopback often shows duplicate receives (TX and RX copies); unique byte counts and SACKs are still meaningful.
+
+MAC discovery runs before the sender traffic clock starts and is bounded by
+`--connect-timeout`. For routed traffic, SITG resolves the gateway rather than the
+remote host. For SRv6, it looks up each outer uSID destination. Neighbor lookups
+are scoped to `--iface`; a cold cache triggers a small UDP discard-port probe
+to let the kernel perform ARP/NDP. Loopback uses a zero MAC automatically.
+`--dst-mac` remains available to override discovery for special lab setups.
 
 ## Statistics
 

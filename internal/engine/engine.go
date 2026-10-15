@@ -77,12 +77,26 @@ func (e *Engine) resolveMAC(ip netip.Addr) (net.HardwareAddr, error) {
 		e.dstMAC[ip] = e.cfg.DstMAC
 		return e.cfg.DstMAC, nil
 	}
-	mac, err := link.LookupNeighborMAC(ip)
+	mac, err := link.ResolveDestinationMAC(e.ep, ip, e.cfg.ConnectTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("resolve MAC for %s: %w (pass --dst-mac)", ip, err)
+		return nil, fmt.Errorf("resolve next-hop MAC for %s: %w", ip, err)
 	}
 	e.dstMAC[ip] = mac
 	return mac, nil
+}
+
+// Resolve peers before the traffic clock starts, including every SRv6 path.
+func (e *Engine) prepareMACs() error {
+	destinations := e.sel.Peers()
+	if len(e.paths) > 0 {
+		destinations = e.paths
+	}
+	for _, dst := range destinations {
+		if _, err := e.resolveMAC(dst); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (e *Engine) srcIP() (netip.Addr, error) {
@@ -103,7 +117,11 @@ func (e *Engine) buildOpts(dst netip.Addr, entropy uint16, pathIdx int) (wire.Bu
 	if err != nil {
 		return wire.BuildOpts{}, err
 	}
-	mac, err := e.resolveMAC(dst)
+	linkDst := dst
+	if e.cfg.Entropy == config.EntropySRv6 && len(e.paths) > 0 {
+		linkDst = e.paths[pathIdx%len(e.paths)]
+	}
+	mac, err := e.resolveMAC(linkDst)
 	if err != nil {
 		return wire.BuildOpts{}, err
 	}
@@ -155,6 +173,9 @@ func (e *Engine) buildFrame(opts wire.BuildOpts, transport []byte) ([]byte, erro
 func (e *Engine) runSend(ctx context.Context) error {
 	if e.cfg.Proto == config.ProtoFalcon {
 		return e.runFalconSend(ctx)
+	}
+	if err := e.prepareMACs(); err != nil {
+		return err
 	}
 	win := NewSendWindow(e.cfg.Window, e.cfg.RTO)
 	deadline := time.Now().Add(e.cfg.Duration)
