@@ -214,6 +214,7 @@ func (e *Engine) runSend(ctx context.Context) error {
 	}
 
 	for {
+		retransmitDue := false
 		select {
 		case <-ctx.Done():
 			e.stats.MarkEnd()
@@ -222,15 +223,12 @@ func (e *Engine) runSend(ctx context.Context) error {
 		case <-ticker.C:
 			progress()
 		case <-rtoTicker.C:
-			if pkt := win.OldestExpired(time.Now()); pkt != nil {
-				if err := e.retransmit(pkt, &pathIdx, entropyBase, win); err != nil {
-					return err
-				}
-			}
+			retransmitDue = true
 		default:
 		}
 
-		// Receive SACKs
+		// Apply queued SACKs before checking retransmission deadlines. A timer
+		// waking this loop may be older than ACKs already waiting in the socket.
 		for {
 			n, err := e.sock.Recv(recvBuf)
 			if err != nil {
@@ -249,6 +247,14 @@ func (e *Engine) runSend(ctx context.Context) error {
 			e.stats.BytesAcked.Add(acked)
 			if rtt > 0 && rtt < time.Second {
 				e.stats.ObserveRTT(rtt)
+			}
+		}
+
+		if retransmitDue {
+			if pkt := win.OldestExpired(time.Now()); pkt != nil {
+				if err := e.retransmit(pkt, &pathIdx, entropyBase, win); err != nil {
+					return err
+				}
 			}
 		}
 

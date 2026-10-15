@@ -102,7 +102,7 @@ func Parse(args []string) (*Config, error) {
 	duration := fs.Duration("duration", 10*time.Second, "run duration")
 	window := fs.Int("window", 256, "in-flight packet window")
 	sackEvery := fs.Int("sack-every", 16, "receiver emits SACK every N data packets")
-	rto := fs.Duration("rto", time.Millisecond, "retransmission timeout")
+	rto := fs.Duration("rto", 10*time.Millisecond, "retransmission timeout")
 	entropy := fs.String("entropy", "ecmp", "entropy mode: ecmp|srv6")
 	locator := fs.String("locator", "fc00::", "SRv6 locator prefix (32-bit)")
 	paths := fs.Int("paths", 64, "number of SRv6 paths / entropy values")

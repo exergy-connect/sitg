@@ -85,7 +85,7 @@ beyond those limits are rejected or ignored. UET/MRC flow state remains until ex
 | `--duration` | `10s` | Run length; sender then drains the window; receiver exits when set |
 | `--window` | `256` | In-flight packet window |
 | `--sack-every` | `16` | Receiver emits a SACK every N data packets |
-| `--rto` | `1ms` | Retransmission timeout (oldest hole; linear then exponential backoff) |
+| `--rto` | `10ms` | Retransmission timeout (oldest hole; linear then exponential backoff) |
 | `--entropy` | `ecmp` | `ecmp` or `srv6` |
 | `--locator` | `fc00::` | 32-bit SRv6 locator prefix |
 | `--paths` | `64` | Number of entropy values / SRv6 paths |
@@ -277,9 +277,14 @@ to let the kernel perform ARP/NDP. Loopback uses a zero MAC automatically.
 
 Both roles print a one-line progress update about once per second, then a final report on SIGINT, duration end, or (sender) window drain.
 
-**Sender:** packets sent, retransmissions, SACKs received, bytes sent / acknowledged, inferred loss, goodput, SACK RTT (min/mean/max), total time.
+**Sender:** packets sent, retransmissions, SACKs received, bytes sent / acknowledged, retransmission ratio, goodput, SACK RTT (min/mean/max), total time.
 
 **Receiver:** packets received, duplicates, RTX-flagged retransmissions, SACKs sent, unique bytes, gaps open, goodput, total time.
+
+The retransmission ratio is retries divided by all transmitted packets. It is
+not a measurement of network packet loss: delayed ACKs or process scheduling
+can cause retries even when every original packet arrives. The default 10 ms
+RTO allows for ACK batching and userspace scheduling; tune `--rto` to your lab.
 
 ## Notes
 
