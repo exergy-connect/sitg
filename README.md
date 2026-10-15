@@ -55,7 +55,7 @@ Use `--proto all --encap udp6` to restrict the wire format, or
 `--proto uet --encap all` to receive all UET variants. Senders select one concrete encapsulation and either a single protocol or
 `mixed` (UDP only). `--duration 0s` keeps the receiver running until SIGINT.
 
-`--qp` still selects the UET/MRC QP and Falcon CM service. Reliability state is
+`--qp` selects the UET/MRC QP and Falcon CM service. Receivers can use `--accept-any-qp` to accept any of these identifiers; each UET/MRC QP retains an independent reliability window. Fixed-QP filtering remains the default. Reliability state is
 separate for each protocol, encapsulation, peer, local IP, QP and plain/SRv6
 variant; Falcon connections retain their negotiated CIDs and sequence windows.
 ACKs use the incoming protocol and encapsulation and return directly to the inner
@@ -339,7 +339,7 @@ RTO allows for ACK batching and userspace scheduling; tune `--rto` to your lab.
 - Reliability is a simplified window + SACK + RTO model for traffic generation, not full UET CMS/PDS or MRC congestion control.
 - Non-Linux builds compile stub link code but cannot inject packets.
 
-Packet rates such as `--rate 1000pps` count each transmitted data packet once, regardless of packet size. Falcon and mixed mode also count retransmissions against the rate.
+Packet rates such as `--rate 1000pps` count each transmitted data packet once, regardless of packet size. Retransmissions count against the same rate in every protocol and mixed mode.
 
 ## Traffic scenarios
 
@@ -365,7 +365,7 @@ Example `traffic.txt`:
 
 Flags supplied alongside `--scenario` initialize the parameters. Each line
 changes only the flags it specifies; all other parameters carry forward from
-the CLI and previous lines. For example, after `--rate 2pps --duration 8s`, a
+the CLI and previous lines. Artificial Tango allocates a fresh QP for every section from a random 16-bit range per invocation; its receiver must use `--accept-any-qp`. Falcon still negotiates connection IDs separately. For example, after `--rate 2pps --duration 8s`, a
 line containing only `--proto falcon` keeps that rate and duration.
 All steps are validated before traffic starts. Steps run in file order, each
 finishing its session and closing its socket before the next starts. Errors

@@ -183,10 +183,13 @@ func (e *Engine) runReceiver(ctx context.Context) error {
 			}
 			response := e.falconHello(0)
 			response.Encap = ev.hello.Encap
+			if e.cfg.AcceptAnyQP {
+				response.Service = ev.hello.Service
+			}
 			err := ev.hello.validate()
 			if err == nil {
 				switch {
-				case ev.hello.Service != e.cfg.QP:
+				case !e.cfg.AcceptAnyQP && ev.hello.Service != e.cfg.QP:
 					err = fmt.Errorf("service mismatch: sender qp=%d, receiver qp=%d (set --qp to match)", ev.hello.Service, e.cfg.QP)
 				case !e.acceptsEncap(ev.hello.Encap):
 					err = fmt.Errorf("encapsulation mismatch: sender encap=%s, receiver encap=%s", ev.hello.Encap, e.cfg.Encap)
@@ -259,7 +262,7 @@ func (e *Engine) runReceiver(ctx context.Context) error {
 				continue
 			}
 		} else {
-			if f.QP != e.cfg.QP {
+			if !e.cfg.AcceptAnyQP && f.QP != e.cfg.QP {
 				continue
 			}
 			key := receiverFlowKey{proto: f.Proto, encap: f.Encap, src: f.SrcIP, dst: f.DstIP, qp: f.QP, srv6: f.OuterSRv6}

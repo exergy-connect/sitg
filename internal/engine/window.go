@@ -74,6 +74,10 @@ func (w *SendWindow) Track(pkt *Inflight) {
 func (w *SendWindow) ApplySACK(cumAck uint32, bitmap uint64, now time.Time) (ackedBytes uint64, newlyAcked int, sampleRTT time.Duration) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	// Ignore ACKs beyond anything this sender has transmitted.
+	if cumAck > w.nextPSN {
+		return 0, 0, 0
+	}
 	var newest time.Time
 	take := func(pkt *Inflight) {
 		ackedBytes += uint64(pkt.Bytes)

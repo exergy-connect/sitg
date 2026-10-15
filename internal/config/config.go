@@ -80,6 +80,7 @@ type Config struct {
 	Hops           int
 	Radix          int
 	USIDBase       uint16
+	AcceptAnyQP    bool
 	QP             uint32
 	FalconCMPort   int
 	SwitchEvery    SwitchLimit
@@ -115,6 +116,7 @@ func Parse(args []string) (*Config, error) {
 	radix := fs.Int("radix", 32, "fabric radix for path encoding")
 	usidBase := fs.String("usid-base", "0x0100", "base 16-bit uSID value")
 	qp := fs.Uint("qp", 1, "queue pair / PDC identifier")
+	acceptAnyQP := fs.Bool("accept-any-qp", false, "receiver: accept any QP / Falcon service")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -158,6 +160,7 @@ func Parse(args []string) (*Config, error) {
 		Hops:           *hops,
 		Radix:          *radix,
 		QP:             uint32(*qp),
+		AcceptAnyQP:    *acceptAnyQP,
 		Duration:       runDuration,
 	}
 
@@ -226,6 +229,9 @@ func Parse(args []string) (*Config, error) {
 }
 
 func (c *Config) Validate() error {
+	if c.AcceptAnyQP && c.Role != RoleRecv {
+		return fmt.Errorf("--accept-any-qp requires --role recv")
+	}
 	switch c.Role {
 	case RoleSend, RoleRecv:
 	default:

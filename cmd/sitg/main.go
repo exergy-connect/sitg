@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
+	"math/big"
 	"os"
 	"os/signal"
 	"strings"
@@ -59,6 +61,16 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("scenario %s: %w", file, err)
 	}
+	// A new QP per Tango section isolates receiver sequence state across runs.
+	if file == "artificial-tango" {
+		base, err := rand.Int(rand.Reader, big.NewInt(int64(65535-len(steps))))
+		if err != nil {
+			return fmt.Errorf("allocate scenario QPs: %w", err)
+		}
+		for i := range steps {
+			steps[i].Config.QP = uint32(base.Int64()) + 1 + uint32(i)
+		}
+	}
 	for i, step := range steps {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -100,6 +112,7 @@ func scenarioArgs(args []string) (string, []string, error) {
 }
 
 func runSession(ctx context.Context, cfg *config.Config) error {
+
 	ep, err := link.ResolveEndpoint(cfg.Iface)
 	if err != nil {
 		return err
@@ -113,6 +126,6 @@ func runSession(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "sitg %s proto=%s encap=%s iface=%s entropy=%s\n", cfg.Role, cfg.Proto, cfg.Encap, cfg.Iface, cfg.Entropy)
+	fmt.Fprintf(os.Stderr, "sitg %s proto=%s encap=%s iface=%s entropy=%s qp=%d\n", cfg.Role, cfg.Proto, cfg.Encap, cfg.Iface, cfg.Entropy, cfg.QP)
 	return eng.RunContext(ctx)
 }

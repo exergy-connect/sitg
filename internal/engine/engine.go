@@ -227,9 +227,10 @@ func (e *Engine) runSend(ctx context.Context) error {
 		payloadScratch[i] = byte(i)
 	}
 
-	tokens := e.rateTokens()
+	tokens := max(e.rateTokens()*0.01, e.packetCost(e.cfg.PktSize+256))
 	lastRefill := time.Now()
 	draining := false
+	var drainDeadline time.Time
 
 	var (
 		curDst     netip.Addr
@@ -279,14 +280,6 @@ func (e *Engine) runSend(ctx context.Context) error {
 			}
 		}
 
-		if retransmitDue {
-			if pkt := win.OldestExpired(time.Now()); pkt != nil {
-				if err := e.retransmit(pkt, &pathIdx, entropyBase, win); err != nil {
-					return err
-				}
-			}
-		}
-
 		now := time.Now()
 		elapsed := now.Sub(lastRefill).Seconds()
 		if elapsed > 0 {
@@ -298,10 +291,25 @@ func (e *Engine) runSend(ctx context.Context) error {
 			lastRefill = now
 		}
 
+		if retransmitDue {
+			if pkt := win.OldestExpired(time.Now()); pkt != nil && tokens >= e.packetCost(pkt.Bytes) {
+				if err := e.retransmit(pkt, &pathIdx, entropyBase, win, &tokens); err != nil {
+					return err
+				}
+			}
+		}
+
 		if !draining && now.After(deadline) {
 			draining = true
 		}
 		if draining {
+			if drainDeadline.IsZero() {
+				drainDeadline = now.Add(e.cfg.ConnectTimeout)
+			}
+			if !win.Empty() && !now.Before(drainDeadline) {
+				e.finishStats()
+				return fmt.Errorf("%s ACK drain timed out after %s: %d packets remain (qp=%d)", e.cfg.Proto, e.cfg.ConnectTimeout, win.Len(), e.cfg.QP)
+			}
 			if win.Empty() {
 				e.stats.MarkEnd()
 				progress()
@@ -375,7 +383,7 @@ func (e *Engine) runSend(ctx context.Context) error {
 	}
 }
 
-func (e *Engine) retransmit(pkt *Inflight, pathIdx *int, entropyBase uint16, win *SendWindow) error {
+func (e *Engine) retransmit(pkt *Inflight, pathIdx *int, entropyBase uint16, win *SendWindow, tokens *float64) error {
 	*pathIdx++
 	dst := e.cfg.Dst
 	if pkt.DstIP != "" {
@@ -403,6 +411,7 @@ func (e *Engine) retransmit(pkt *Inflight, pathIdx *int, entropyBase uint16, win
 	if err := e.sock.Send(frame); err != nil {
 		return err
 	}
+	*tokens -= e.packetCost(len(frame))
 	win.MarkRetransmit(pkt.PSN, time.Now())
 	e.stats.PacketsSent.Add(1)
 	e.stats.Retransmits.Add(1)
