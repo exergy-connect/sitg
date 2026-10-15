@@ -184,8 +184,17 @@ func (e *Engine) runReceiver(ctx context.Context) error {
 			response := e.falconHello(0)
 			response.Encap = ev.hello.Encap
 			err := ev.hello.validate()
-			if err == nil && (ev.hello.Service != e.cfg.QP || !e.acceptsEncap(ev.hello.Encap) || !local[ev.local] || (ev.hello.Encap == "udp4") != ev.local.Is4()) {
-				err = fmt.Errorf("service or encapsulation mismatch")
+			if err == nil {
+				switch {
+				case ev.hello.Service != e.cfg.QP:
+					err = fmt.Errorf("service mismatch: sender qp=%d, receiver qp=%d (set --qp to match)", ev.hello.Service, e.cfg.QP)
+				case !e.acceptsEncap(ev.hello.Encap):
+					err = fmt.Errorf("encapsulation mismatch: sender encap=%s, receiver encap=%s", ev.hello.Encap, e.cfg.Encap)
+				case !local[ev.local]:
+					err = fmt.Errorf("local address %s is not enabled on receiver interface %s", ev.local, e.cfg.Iface)
+				case (ev.hello.Encap == "udp4") != ev.local.Is4():
+					err = fmt.Errorf("encapsulation %s does not match local address %s", ev.hello.Encap, ev.local)
+				}
 			}
 			if err == nil {
 				for _, c := range conns {
