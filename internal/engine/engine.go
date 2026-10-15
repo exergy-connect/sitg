@@ -154,11 +154,11 @@ func (e *Engine) buildOpts(dst netip.Addr, entropy uint16, pathIdx int) (wire.Bu
 	return opts, nil
 }
 
-func (e *Engine) encodeData(psn, msgID, offset, length uint32, rtx bool, payload []byte) []byte {
+func (e *Engine) encodeData(psn, msgID, offset, length uint32, rtx bool, payload []byte, clearPSN ...uint32) []byte {
 	if e.cfg.Proto == config.ProtoMRC {
 		return wire.EncodeMRCData(psn, e.cfg.QP, msgID, offset, length, rtx, payload)
 	}
-	return wire.EncodeUETData(psn, e.cfg.QP, msgID, offset, length, rtx, payload)
+	return wire.EncodeUETData(psn, e.cfg.QP, msgID, offset, length, rtx, payload, clearPSN...)
 }
 
 func (e *Engine) encodeSACK(cumAck uint32, bitmap uint64) []byte {
@@ -316,7 +316,7 @@ func (e *Engine) runSend(ctx context.Context) error {
 			}
 			psn := win.NextPSN()
 			payload := payloadScratch[:chunk]
-			transport := e.encodeData(psn, msgID, uint32(curOffset), uint32(curMsgSize), false, payload)
+			transport := e.encodeData(psn, msgID, uint32(curOffset), uint32(curMsgSize), false, payload, win.ClearPSN())
 			entropy := entropyBase + uint16(pathIdx%e.cfg.Paths)
 			opts, err := e.buildOpts(curDst, entropy, pathIdx)
 			if err != nil {
@@ -374,7 +374,7 @@ func (e *Engine) retransmit(pkt *Inflight, pathIdx *int, entropyBase uint16, win
 	if err != nil {
 		return err
 	}
-	transport := e.encodeData(pkt.PSN, pkt.MsgID, pkt.Offset, pkt.Length, true, pkt.Payload)
+	transport := e.encodeData(pkt.PSN, pkt.MsgID, pkt.Offset, pkt.Length, true, pkt.Payload, win.ClearPSN())
 	frame, err := e.buildFrame(opts, transport)
 	if err != nil {
 		return err

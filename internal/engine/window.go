@@ -244,3 +244,10 @@ func (r *RecvTracker) Snapshot() (cumAck uint32, bitmap uint64, gaps int) {
 	}
 	return r.cumAck, r.bitmap, gaps
 }
+
+// ClearPSN returns the inclusive PSN whose ACK has been received.
+func (w *SendWindow) ClearPSN() uint32 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.cumAck - 1
+}

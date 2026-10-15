@@ -120,7 +120,7 @@ func (e *Engine) runMixedSend(ctx context.Context) error {
 		var raw []byte
 		switch f.proto {
 		case config.ProtoUET:
-			raw, err = wire.BuildUETFrame(opts, wire.EncodeUETData(pkt.PSN, e.cfg.QP, pkt.MsgID, pkt.Offset, pkt.Length, retry, pkt.Payload))
+			raw, err = wire.BuildUETFrame(opts, wire.EncodeUETData(pkt.PSN, e.cfg.QP, pkt.MsgID, pkt.Offset, pkt.Length, retry, pkt.Payload, f.window.ClearPSN()))
 		case config.ProtoMRC:
 			raw, err = wire.BuildMRCFrame(opts, wire.EncodeMRCData(pkt.PSN, e.cfg.QP, pkt.MsgID, pkt.Offset, pkt.Length, retry, pkt.Payload))
 		case config.ProtoFalcon:

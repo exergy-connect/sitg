@@ -250,6 +250,9 @@ func (c *Config) Validate() error {
 	if (c.Proto == ProtoMRC || c.Proto == ProtoFalcon || c.Proto == ProtoMixed) && (c.Encap == EncapIP6 || c.Encap == EncapIP4) {
 		return fmt.Errorf("%s requires udp6 or udp4 encapsulation", c.Proto)
 	}
+	if (c.Proto == ProtoUET || c.Proto == ProtoAll || c.Proto == ProtoMixed) && c.QP > 0xffff {
+		return fmt.Errorf("UET PDC identifier (--qp) must fit in 16 bits")
+	}
 	if (c.Proto == ProtoFalcon || c.Proto == ProtoAll || c.Proto == ProtoMixed) && c.QP > 0xffffff {
 		return fmt.Errorf("falcon connection ID (--qp) must fit in 24 bits")
 	}

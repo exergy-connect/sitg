@@ -2,77 +2,121 @@ package wire
 
 import (
 	"encoding/binary"
+	"hash/crc32"
 )
 
 const (
-	UETPDSLen = 12
-	UETSESLen = 20
-	UETSACKLen = UETPDSLen + 12 // PDS + cumAck + bitmap
-
-	UETTypeData uint8 = 0
-	UETTypeSACK uint8 = 1
-
-	UETModeRUD uint8 = 0
+	UETPDSLen         = 12
+	UETSESLen         = 44 // Standard Request
+	UETSACKLen        = 32 // ACK_CC, including its 20-byte extension
+	UETTypeData uint8 = 2  // RUD Request
+	UETTypeSACK uint8 = 8  // ACK_CC
+	UETModeRUD  uint8 = 0
 )
 
-// EncodeUETData builds the UET transport payload (PDS + SES + data).
-func EncodeUETData(psn, qp, msgID, offset, length uint32, rtx bool, payload []byte) []byte {
-	buf := make([]byte, UETPDSLen+UETSESLen+len(payload))
-	// PDS: type(1) | mode(1) | flags(1) | rsvd(1) | psn(4) | qp(4)
-	buf[0] = UETTypeData
-	buf[1] = UETModeRUD
+// EncodeUETData emits a RUD Request with a Standard SES Write request.
+// SITG uses preconfigured, symmetric 16-bit PDC IDs (no PDC negotiation).
+// The CRC is reserved here and filled by BuildUETFrame once IP addresses exist.
+func EncodeUETData(psn, qp, msgID, offset, length uint32, rtx bool, payload []byte, clearPSN ...uint32) []byte {
+	b := make([]byte, UETPDSLen+UETSESLen+len(payload)+4)
+	common := uint16(UETTypeData)<<11 | 3<<7 | 8 // Standard SES, ACK request
 	if rtx {
-		buf[2] = 0x01
+		common |= 16
 	}
-	binary.BigEndian.PutUint32(buf[4:8], psn)
-	binary.BigEndian.PutUint32(buf[8:12], qp)
-	// SES: msgID(4) | offset(4) | length(4) | rsvd(8)
-	binary.BigEndian.PutUint32(buf[12:16], msgID)
-	binary.BigEndian.PutUint32(buf[16:20], offset)
-	binary.BigEndian.PutUint32(buf[20:24], length)
-	copy(buf[UETPDSLen+UETSESLen:], payload)
-	return buf
+	binary.BigEndian.PutUint16(b, common)
+	// Default to the initial clear point; senders supply their acknowledged PSN.
+	clear := ^uint32(0)
+	if len(clearPSN) > 0 {
+		clear = clearPSN[0]
+	}
+	delta := int32(clear - psn)
+	if delta > 0 {
+		delta = 0
+	}
+	if delta < -32768 {
+		delta = -32768
+	}
+	binary.BigEndian.PutUint16(b[2:], uint16(int16(delta)))
+	binary.BigEndian.PutUint32(b[4:], psn)
+	binary.BigEndian.PutUint16(b[8:], uint16(qp))
+	binary.BigEndian.PutUint16(b[10:], uint16(qp))
+	s := b[12:]
+	s[0] = 1 // Write
+	if offset == 0 {
+		s[1] |= 1
+	}
+	if uint64(offset)+uint64(len(payload)) >= uint64(length) {
+		s[1] |= 2
+	}
+	binary.BigEndian.PutUint16(s[2:], uint16(msgID))
+	binary.BigEndian.PutUint64(s[12:], uint64(offset))
+	if offset != 0 {
+		binary.BigEndian.PutUint32(s[32:], uint32(len(payload)))
+		binary.BigEndian.PutUint32(s[36:], offset)
+	}
+	binary.BigEndian.PutUint32(s[40:], length)
+	copy(b[UETPDSLen+UETSESLen:], payload)
+	return b
 }
 
-// EncodeUETSACK builds a UET SACK transport payload.
+// EncodeUETSACK translates the engine's exclusive cumulative ACK and base+1
+// bitmap into an ACK_CC with a byte-aligned SACK base, per UET 1.0.1.
+// Bits beyond this 64-bit aligned window remain pending for a subsequent ACK.
 func EncodeUETSACK(qp, cumAck uint32, bitmap uint64) []byte {
-	buf := make([]byte, UETSACKLen)
-	buf[0] = UETTypeSACK
-	buf[1] = UETModeRUD
-	binary.BigEndian.PutUint32(buf[4:8], cumAck)
-	binary.BigEndian.PutUint32(buf[8:12], qp)
-	binary.BigEndian.PutUint32(buf[12:16], cumAck)
-	binary.BigEndian.PutUint64(buf[16:24], bitmap)
-	return buf
+	b := make([]byte, UETSACKLen+4)
+	binary.BigEndian.PutUint16(b, uint16(UETTypeSACK)<<11)
+	binary.BigEndian.PutUint32(b[4:], cumAck-1)
+	binary.BigEndian.PutUint16(b[8:], uint16(qp))
+	binary.BigEndian.PutUint16(b[10:], uint16(qp))
+	base := cumAck &^ 7
+	binary.BigEndian.PutUint16(b[14:], uint16(int16(int32(base-(cumAck-1)))))
+	shift := cumAck - base
+	bits := bitmap << (shift + 1)
+	bits |= (uint64(1) << shift) - 1 // PSNs before CACK are already received
+	binary.BigEndian.PutUint64(b[16:], bits)
+	// CC type 0 = NSCC; idle congestion state is zero.
+	return b
 }
 
-// DecodeUETTransport parses PDS(+SES or SACK) from transport payload.
-func DecodeUETTransport(payload []byte) (*Frame, error) {
-	if len(payload) < UETPDSLen {
+func DecodeUETTransport(b []byte) (*Frame, error) {
+	if len(b) < UETPDSLen+4 {
 		return nil, ErrShortPacket
 	}
-	f := &Frame{Proto: "uet"}
-	switch payload[0] {
+	common := binary.BigEndian.Uint16(b)
+	f := &Frame{Proto: "uet", QP: uint32(binary.BigEndian.Uint16(b[8:]))}
+	switch uint8(common >> 11) {
 	case UETTypeData:
-		if len(payload) < UETPDSLen+UETSESLen {
+		if (common>>7)&15 != 3 {
+			return nil, ErrUnsupported
+		}
+		if len(b) < UETPDSLen+UETSESLen+4 {
 			return nil, ErrShortPacket
 		}
+		s := b[12:]
+		if s[0]&63 != 1 {
+			return nil, ErrUnsupported
+		}
 		f.Type = TypeData
-		f.RTX = payload[2]&0x01 != 0
-		f.PSN = binary.BigEndian.Uint32(payload[4:8])
-		f.QP = binary.BigEndian.Uint32(payload[8:12])
-		f.MsgID = binary.BigEndian.Uint32(payload[12:16])
-		f.Offset = binary.BigEndian.Uint32(payload[16:20])
-		f.Length = binary.BigEndian.Uint32(payload[20:24])
-		f.Payload = append([]byte(nil), payload[UETPDSLen+UETSESLen:]...)
+		f.RTX = common&16 != 0
+		f.PSN = binary.BigEndian.Uint32(b[4:])
+		f.MsgID = uint32(binary.BigEndian.Uint16(s[2:]))
+		f.Offset = uint32(binary.BigEndian.Uint64(s[12:]))
+		f.Length = binary.BigEndian.Uint32(s[40:])
+		f.Payload = append([]byte(nil), b[UETPDSLen+UETSESLen:len(b)-4]...)
 	case UETTypeSACK:
-		if len(payload) < UETSACKLen {
+		if len(b) < UETSACKLen+4 {
 			return nil, ErrShortPacket
 		}
 		f.Type = TypeSACK
-		f.CumAck = binary.BigEndian.Uint32(payload[12:16])
-		f.QP = binary.BigEndian.Uint32(payload[8:12])
-		f.Bitmap = binary.BigEndian.Uint64(payload[16:24])
+		f.CumAck = binary.BigEndian.Uint32(b[4:]) + 1
+		base := f.CumAck - 1 + uint32(int32(int16(binary.BigEndian.Uint16(b[14:]))))
+		bits := binary.BigEndian.Uint64(b[16:])
+		for i := uint32(0); i < 64; i++ {
+			delta := base + i - f.CumAck
+			if bits&(uint64(1)<<i) != 0 && delta >= 1 && delta <= 64 {
+				f.Bitmap |= uint64(1) << (delta - 1)
+			}
+		}
 		f.PSN = f.CumAck
 	default:
 		return nil, ErrUnsupported
@@ -80,7 +124,25 @@ func DecodeUETTransport(payload []byte) (*Frame, error) {
 	return f, nil
 }
 
-// BuildUETFrame builds a complete Ethernet frame for UET.
+// BuildUETFrame fills the CRC32C over the innermost source IP address through
+// the UET payload, including the zero UDP checksum or native entropy header.
 func BuildUETFrame(opts BuildOpts, transport []byte) ([]byte, error) {
-	return WrapEthernetIP(opts, transport, UETUDPPort, true)
+	frame, err := WrapEthernetIP(opts, transport, UETUDPPort, true)
+	if err != nil {
+		return nil, err
+	}
+	ip := EthernetHeaderLen
+	if opts.UseSRv6 {
+		ip += IPv6HeaderLen
+	}
+	addr := ip + 8
+	if opts.Encap == "udp4" || opts.Encap == "ip4" {
+		addr = ip + 12
+	}
+	if len(transport) < 4 {
+		return nil, ErrShortPacket
+	}
+	crc := crc32.Checksum(frame[addr:len(frame)-4], crc32.MakeTable(crc32.Castagnoli))
+	binary.BigEndian.PutUint32(frame[len(frame)-4:], crc)
+	return frame, nil
 }

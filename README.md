@@ -2,7 +2,7 @@
 
 SITG is a Linux traffic generator for **Ultra Ethernet Transport (UET)**, **Multipath Reliable Connection (MRC)**, and **OCP Falcon** flows. It injects live frames with `AF_PACKET`, runs a simplified reliable window between a send and recv process, and can optionally source-route packets with **SRv6 uSID** destinations.
 
-Headers are a recognizable subset of UET, MRC, and Falcon for lab and fabric testing—not a full specification implementation.
+UET traffic uses UET 1.0.1 RUD Request headers, Standard SES Write requests, ACK_CC selective acknowledgments, and a CRC32C trailer covering the inner IP addresses through the transport payload. MRC and Falcon support remains a subset for lab and fabric testing.
 
 ## Requirements
 
@@ -105,6 +105,8 @@ beyond those limits are rejected or ignored. UET/MRC flow state remains until ex
 | `udp4` | UET, MRC, or Falcon | IPv4 + UDP |
 | `ip6` | UET only | Native IPv6 + 4-byte entropy header |
 | `ip4` | UET only | Native IPv4 + 4-byte entropy header (DF set) |
+
+UET uses preconfigured symmetric 16-bit PDC IDs (`--qp`, at most 65535), rather than negotiating PDC establishment. SES message IDs wrap at 16 bits. Requests carry message boundaries, offsets, lengths, and the retransmission flag. ACK_CC translates the internal next-expected counter to UET's inclusive CACK and uses an aligned 64-bit SACK window; higher selective bits wait for a later ACK. The congestion state is idle NSCC; this is not a full UET congestion-control implementation. Both endpoints must use the updated wire format; older SITG private UET packets are incompatible.
 
 UET over UDP uses UDP source port as entropy and sets the UDP checksum to `0`. Native UET places a 4-byte entropy header after the IP header; configure the IP protocol with `--ip-proto` (default `253` until IANA assigns one).
 
