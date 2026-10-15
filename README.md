@@ -44,6 +44,17 @@ or run a receiver with `--proto all` to accept all supported wire formats.
 sudo ./sitg --role recv --iface eth0 --proto all --duration 0s --qp 1
 ```
 
+On a VLAN trunk, one receiver can listen on several addressed interfaces:
+
+```bash
+sudo ./sitg --role recv --iface bond1.20,bond1.30,bond1.10 --proto all --accept-any-qp --duration 0s
+```
+
+Each interface has independent protocol state, counters, and reply sockets.
+Progress and final reports identify the interface. All interfaces use the same
+receiver options; an error on any interface stops the whole receiver. Interface
+names must be unique and comma-separated without spaces. Senders use one interface.
+
 One receiver accepts UET, MRC, and Falcon simultaneously, using every supported
 IPv4/IPv6 encapsulation: UDP for all three protocols and native IP for UET.
 Plain and SRv6-encapsulated traffic are both detected automatically, regardless
@@ -71,7 +82,7 @@ beyond those limits are rejected or ignored. UET/MRC flow state remains until ex
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--role` | `send` | `send` or `recv` |
-| `--iface` | *(required)* | Network interface for AF_PACKET |
+| `--iface` | *(required)* | Network interface for AF_PACKET; receivers accept a comma-separated list |
 | `--proto` | `uet` | `uet`, `mrc`, `falcon`, `mixed` (sender), or `all` (receiver) |
 | `--switch-every` | `1s` | Mixed sender switches after this duration, packet count, or payload size |
 | `--encap` | `udp6` | Encapsulation; `all` for receivers (implicit with `--proto all`) |

@@ -112,20 +112,53 @@ func scenarioArgs(args []string) (string, []string, error) {
 }
 
 func runSession(ctx context.Context, cfg *config.Config) error {
-
-	ep, err := link.ResolveEndpoint(cfg.Iface)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	sock, err := link.OpenSocket(ep, cfg.IPProto)
-	if err != nil {
-		return err
-	}
-	defer sock.Close()
-	eng, err := engine.New(cfg, sock)
-	if err != nil {
-		return err
+	// Prepare every interface before starting traffic. Each receiver owns its
+	// sockets, sequence tracking and replies, including Falcon CM listeners.
+	var sessions []func(context.Context) error
+	for _, name := range strings.Split(cfg.Iface, ",") {
+		local := *cfg
+		local.Iface = name
+		ep, err := link.ResolveEndpoint(name)
+		if err != nil {
+			return fmt.Errorf("interface %s: %w", name, err)
+		}
+		sock, err := link.OpenSocket(ep, cfg.IPProto)
+		if err != nil {
+			return fmt.Errorf("interface %s: %w", name, err)
+		}
+		defer sock.Close()
+		eng, err := engine.New(&local, sock)
+		if err != nil {
+			return fmt.Errorf("interface %s: %w", name, err)
+		}
+		sessions = append(sessions, func(ctx context.Context) error {
+			if err := eng.RunContext(ctx); err != nil {
+				return fmt.Errorf("interface %s: %w", name, err)
+			}
+			return nil
+		})
 	}
 	fmt.Fprintf(os.Stderr, "sitg %s proto=%s encap=%s iface=%s entropy=%s qp=%d\n", cfg.Role, cfg.Proto, cfg.Encap, cfg.Iface, cfg.Entropy, cfg.QP)
-	return eng.RunContext(ctx)
+	return runSessions(ctx, sessions)
+}
+
+// A failed receiver stops its siblings; always join them before closing sockets.
+func runSessions(ctx context.Context, sessions []func(context.Context) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan error, len(sessions))
+	for _, session := range sessions {
+		go func() { results <- session(ctx) }()
+	}
+	var first error
+	for range sessions {
+		if err := <-results; err != nil && first == nil {
+			first = err
+			cancel()
+		}
+	}
+	return first
 }

@@ -29,8 +29,7 @@ type falconConnection struct {
 
 func (e *Engine) finishStats() {
 	e.stats.MarkEnd()
-	fmt.Fprintln(os.Stderr, e.stats.ProgressLine())
-	fmt.Fprint(os.Stderr, e.stats.FinalReport())
+	fmt.Fprintf(os.Stderr, "iface=%s %s\n%s", e.cfg.Iface, e.stats.ProgressLine(), e.stats.FinalReport())
 }
 
 func (e *Engine) runFalconSend(ctx context.Context) error {

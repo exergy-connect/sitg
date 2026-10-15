@@ -4,6 +4,23 @@ import (
 	"testing"
 )
 
+func TestReceiverInterfaces(t *testing.T) {
+	for _, names := range []string{"bond1.20", "bond1.20,bond1.30,bond1.10"} {
+		cfg, err := Parse([]string{"--role", "recv", "--iface", names, "--proto", "all"})
+		if err != nil || cfg.Iface != names {
+			t.Fatalf("interfaces %q: cfg=%+v err=%v", names, cfg, err)
+		}
+	}
+	for _, names := range []string{"bond1.20,", ",bond1.20", "bond1.20,,bond1.30", "bond1.20,bond1.20", "bond1.20, bond1.30"} {
+		if _, err := Parse([]string{"--role", "recv", "--iface", names}); err == nil {
+			t.Fatalf("accepted invalid interface list %q", names)
+		}
+	}
+	if _, err := Parse([]string{"--iface", "eth1,eth2", "--dst", "::1"}); err == nil {
+		t.Fatal("sender accepted multiple interfaces")
+	}
+}
+
 func TestParseMinimalSend(t *testing.T) {
 	cfg, err := Parse([]string{
 		"--role", "send",

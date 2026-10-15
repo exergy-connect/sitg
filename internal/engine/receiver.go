@@ -229,7 +229,7 @@ func (e *Engine) runReceiver(ctx context.Context) error {
 			continue
 		case <-progress.C:
 			updateGaps()
-			fmt.Fprintln(os.Stderr, e.stats.ProgressLine())
+			fmt.Fprintf(os.Stderr, "iface=%s %s\n", e.cfg.Iface, e.stats.ProgressLine())
 		case <-ackTimer.C:
 			if err := flush(); err != nil {
 				return err

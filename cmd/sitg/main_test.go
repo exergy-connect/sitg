@@ -2,11 +2,66 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestSessionsCancelAndJoinOnFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	want := errors.New("receiver failed")
+	started, stopped := make(chan struct{}), make(chan struct{})
+	err := runSessions(ctx, []func(context.Context) error{
+		func(ctx context.Context) error {
+			close(started)
+			<-ctx.Done()
+			close(stopped)
+			return nil
+		},
+		func(context.Context) error { <-started; return want },
+	})
+	if !errors.Is(err, want) || ctx.Err() != nil {
+		t.Fatalf("got %v, parent=%v", err, ctx.Err())
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("returned before sibling receiver stopped")
+	}
+}
+
+func TestSessionsRunAllUntilComplete(t *testing.T) {
+	ready, release := make(chan struct{}), make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := runSessions(ctx, []func(context.Context) error{
+		func(ctx context.Context) error {
+			close(ready)
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+		func(ctx context.Context) error {
+			select {
+			case <-ready:
+				close(release)
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestScenarioArgs(t *testing.T) {
 	for _, args := range [][]string{{"--scenario", "steps.txt", "--iface", "lo"}, {"--iface", "lo", "--scenario=steps.txt"}} {

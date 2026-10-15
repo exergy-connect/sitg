@@ -91,7 +91,7 @@ func Parse(args []string) (*Config, error) {
 	fs := flag.NewFlagSet("sitg", flag.ContinueOnError)
 
 	role := fs.String("role", "send", "role: send|recv")
-	iface := fs.String("iface", "", "network interface (required)")
+	iface := fs.String("iface", "", "network interface; receiver accepts a comma-separated list (required)")
 	cmPort := fs.Int("falcon-cm-port", 4795, "TCP port for SITG Falcon connection management")
 	connectTimeout := fs.Duration("connect-timeout", 5*time.Second, "connection setup and final window-drain timeout")
 	proto := fs.String("proto", "uet", "protocol: uet|mrc|falcon|mixed (sender)|all (receiver)")
@@ -239,6 +239,20 @@ func (c *Config) Validate() error {
 	}
 	if c.Iface == "" {
 		return fmt.Errorf("--iface is required")
+	}
+	names := strings.Split(c.Iface, ",")
+	if len(names) > 1 && c.Role != RoleRecv {
+		return fmt.Errorf("multiple interfaces require --role recv")
+	}
+	seen := make(map[string]bool)
+	for _, name := range names {
+		if name == "" || strings.TrimSpace(name) != name {
+			return fmt.Errorf("--iface requires nonempty interface names without surrounding whitespace")
+		}
+		if seen[name] {
+			return fmt.Errorf("--iface repeats interface %q", name)
+		}
+		seen[name] = true
 	}
 	switch c.Proto {
 	case ProtoUET, ProtoMRC, ProtoFalcon, ProtoAll, ProtoMixed:
