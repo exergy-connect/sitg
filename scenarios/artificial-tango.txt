@@ -4,7 +4,7 @@
 # ESTIMATES, not measured vocal timestamps; adjust --duration after listening.
 # Times describe cumulative configured traffic duration. Session setup and
 # reliable-window draining add time, so playback is not sample-synchronized.
-# MRC is SITG's spelling for the NVIDIA traffic requested as "MCR".
+# Verse 1 uses NVIDIA MRC traffic.
 # Supply --iface, --encap, and --dst on the scenario player's command line.
 # Each step sets its own parameters; settings do not carry between lines.
 
