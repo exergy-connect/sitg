@@ -6,34 +6,35 @@
 # reliable-window draining add time, so playback is not sample-synchronized.
 # Verse 1 uses NVIDIA MRC traffic.
 # Supply --iface, --encap, and --dst on the scenario player's command line.
-# Each step sets its own parameters; settings do not carry between lines.
+# Parameters carry forward from the CLI and earlier lines unless changed.
+# Built-in defaults: 2pps and 1200-byte payloads; CLI flags can override both.
 
 # 00:00–00:08 | Intro — a quiet MRC pulse before the green voice
---proto mrc --pattern p2p --pkt-size 1200 --rate 100pps --duration 8s
+--proto mrc --pattern p2p --duration 8s
 
 # 00:08–00:24 | Verse 1 — Green / NVIDIA: MRC elephant traffic
---proto mrc --pattern elephant --pkt-size 1200 --rate 5Kpps --duration 16s
+--pattern elephant --duration 16s
 
 # 00:24–00:46 | Chorus 1 — competing vendors; cycle MRC, UET, Falcon
---proto mixed --pattern p2p --pkt-size 1200 --rate 3Kpps --switch-every 1s --duration 22s
+--proto mixed --pattern p2p --switch-every 1s --duration 22s
 
 # 00:46–01:02 | Verse 2 — Blue: UET traffic
---proto uet --pattern elephant --pkt-size 1200 --rate 5Kpps --duration 16s
+--proto uet --pattern elephant --duration 16s
 
 # 01:02–01:24 | Chorus 2 — competing vendors return
---proto mixed --pattern p2p --pkt-size 1200 --rate 3Kpps --switch-every 1s --duration 22s
+--proto mixed --pattern p2p --duration 22s
 
 # 01:24–01:40 | Verse 3 — third male voice: Falcon traffic
---proto falcon --pattern elephant --pkt-size 1200 --rate 5Kpps --duration 16s
+--proto falcon --pattern elephant --duration 16s
 
 # 01:40–02:02 | Chorus 3 — all three voices
---proto mixed --pattern p2p --pkt-size 1200 --rate 4Kpps --switch-every 1s --duration 22s
+--proto mixed --pattern p2p --duration 22s
 
-# 02:02–02:20 | Bridge — the woman's reply; quieter, slower protocol changes
---proto mixed --pattern mice --pkt-size 1200 --rate 500pps --switch-every 3s --duration 18s
+# 02:02–02:20 | Bridge — the woman's reply; slower protocol changes
+--pattern mice --switch-every 3s --duration 18s
 
 # 02:20–02:44 | Final chorus — all four voices; faster protocol changes
---proto mixed --pattern p2p --pkt-size 1200 --rate 5Kpps --switch-every 250ms --duration 24s
+--pattern p2p --switch-every 250ms --duration 24s
 
-# 02:44–03:02.760 | Spoken outro — sparse traffic, then stop
---proto mixed --pattern mice --pkt-size 1200 --rate 100pps --switch-every 3s --duration 18.760s
+# 02:44–03:03 | Spoken outro — steady pulse, then stop
+--pattern mice --switch-every 3s --duration 19s

@@ -31,7 +31,8 @@ func TestMixedSwitchAndReliability(t *testing.T) {
 			receiver := newFalconTestEngine(t, n, "127.0.0.2", "--proto", "all", "--encap", "udp4")
 			receiver.cfg.FalconCMPort = falconTestPort(t, "127.0.0.2")
 			startFalconTestReceiver(t, receiver)
-			sender := newFalconTestEngine(t, n, "127.0.0.1", "--role", "send", "--proto", "mixed", "--dst", "127.0.0.2", "--dst-mac", "02:00:00:00:00:02", "--switch-every", threshold, "--duration", "100ms", "--rate", "1Mbps", "--rto", "10ms")
+			sender := newFalconTestEngine(t, n, "127.0.0.1", "--role", "send", "--proto", "mixed", "--dst", "127.0.0.2", "--dst-mac", "02:00:00:00:00:02", "--switch-every", threshold, "--duration", "1s", "--rate", "1Mbps", "--rto", "10ms")
+			sender.cfg.Duration = 100 * time.Millisecond
 			sender.cfg.FalconCMPort = receiver.cfg.FalconCMPort
 			record := &mixedRecordingSocket{packetSocket: sender.sock}
 			sender.sock = record

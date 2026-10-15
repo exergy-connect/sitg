@@ -230,8 +230,10 @@ func TestFalconConcurrentIncastFanoutAndRetransmission(t *testing.T) {
 	r2.cfg.FalconCMPort = port
 	startFalconTestReceiver(t, r1)
 	startFalconTestReceiver(t, r2)
-	s1 := newFalconTestEngine(t, n, "127.0.0.1", "--role", "send", "--pattern", "outcast", "--peers", "127.0.0.2,127.0.0.3", "--dst-mac", "02:00:00:00:00:01", "--rate", "1Mbps", "--duration", "100ms")
-	s2 := newFalconTestEngine(t, n, "127.0.0.4", "--role", "send", "--dst", "127.0.0.2", "--dst-mac", "02:00:00:00:00:01", "--rate", "1Mbps", "--duration", "100ms")
+	s1 := newFalconTestEngine(t, n, "127.0.0.1", "--role", "send", "--pattern", "outcast", "--peers", "127.0.0.2,127.0.0.3", "--dst-mac", "02:00:00:00:00:01", "--rate", "1Mbps", "--duration", "1s")
+	s2 := newFalconTestEngine(t, n, "127.0.0.4", "--role", "send", "--dst", "127.0.0.2", "--dst-mac", "02:00:00:00:00:01", "--rate", "1Mbps", "--duration", "1s")
+	s1.cfg.Duration = 100 * time.Millisecond
+	s2.cfg.Duration = 100 * time.Millisecond
 	s1.cfg.FalconCMPort = port
 	s2.cfg.FalconCMPort = port
 	done := make(chan error, 2)

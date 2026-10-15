@@ -45,7 +45,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	var steps []scenario.Step
 	if file == "artificial-tango" {
-		steps, err = scenario.Parse(strings.NewReader(scenarios.ArtificialTango), common)
+		steps, err = scenario.Parse(strings.NewReader(scenarios.ArtificialTango), scenarios.ArtificialTangoArgs(common))
 	} else if file == "-" {
 		steps, err = scenario.Parse(os.Stdin, common)
 	} else {

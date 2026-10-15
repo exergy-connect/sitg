@@ -54,10 +54,11 @@ func TestSenderAppliesQueuedACKBeforeExpiredTimer(t *testing.T) {
 
 func testQueuedACKBeforeExpiredTimer(t *testing.T, proto string) {
 	t.Helper()
-	cfg, err := config.Parse([]string{"--proto", proto, "--iface", "lo", "--encap", "udp4", "--dst", "127.0.0.2", "--dst-mac", "00:00:00:00:00:00", "--window", "2", "--pkt-size", "32", "--msg-size", "64", "--rto", "100us", "--duration", "20ms", "--rate", "1Mbps"})
+	cfg, err := config.Parse([]string{"--proto", proto, "--iface", "lo", "--encap", "udp4", "--dst", "127.0.0.2", "--dst-mac", "00:00:00:00:00:00", "--window", "2", "--pkt-size", "32", "--msg-size", "64", "--rto", "100us", "--duration", "1s", "--rate", "1Mbps"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.Duration = 20 * time.Millisecond
 	ep, err := link.ResolveEndpoint("lo")
 	if err != nil {
 		t.Fatal(err)

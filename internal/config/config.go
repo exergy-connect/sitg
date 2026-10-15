@@ -104,7 +104,7 @@ func Parse(args []string) (*Config, error) {
 	msgSize := fs.String("msg-size", "32KiB", "message size")
 	pktSize := fs.String("pkt-size", "4096", "payload bytes per packet")
 	rate := fs.String("rate", "10Gbps", "send rate: bps/Kbps/Mbps/Gbps or pps/Kpps/Mpps/Gpps")
-	duration := fs.Duration("duration", 10*time.Second, "run duration")
+	duration := fs.String("duration", "10s", "run duration in nonnegative integer seconds (10 or 10s)")
 	window := fs.Int("window", 256, "in-flight packet window")
 	sackEvery := fs.Int("sack-every", 16, "receiver emits SACK every N data packets")
 	rto := fs.Duration("rto", 10*time.Millisecond, "retransmission timeout")
@@ -122,6 +122,11 @@ func Parse(args []string) (*Config, error) {
 
 	if fs.NArg() != 0 {
 		return nil, fmt.Errorf("unexpected arguments: %v", fs.Args())
+	}
+
+	runDuration, err := parseDurationSeconds(*duration)
+	if err != nil {
+		return nil, fmt.Errorf("duration: %w", err)
 	}
 
 	// All protocols implies all encapsulations unless explicitly restricted.
@@ -153,10 +158,9 @@ func Parse(args []string) (*Config, error) {
 		Hops:           *hops,
 		Radix:          *radix,
 		QP:             uint32(*qp),
-		Duration:       *duration,
+		Duration:       runDuration,
 	}
 
-	var err error
 	if cfg.SwitchEvery, err = parseSwitchLimit(*switchEvery); err != nil {
 		return nil, fmt.Errorf("switch-every: %w", err)
 	}
@@ -394,4 +398,21 @@ func parseUint16(s string) (uint16, error) {
 		return 0, err
 	}
 	return uint16(n), nil
+}
+
+func parseDurationSeconds(raw string) (time.Duration, error) {
+	text := strings.TrimSuffix(raw, "s")
+	if text == "" {
+		return 0, fmt.Errorf("must be nonnegative integer seconds (10 or 10s)")
+	}
+	for _, c := range text {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("must be nonnegative integer seconds (10 or 10s)")
+		}
+	}
+	seconds, err := strconv.ParseUint(text, 10, 64)
+	if err != nil || seconds > uint64((1<<63-1)/time.Second) {
+		return 0, fmt.Errorf("integer seconds out of range")
+	}
+	return time.Duration(seconds) * time.Second, nil
 }

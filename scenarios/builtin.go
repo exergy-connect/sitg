@@ -7,3 +7,9 @@ import _ "embed"
 //
 //go:embed artificial-tango.txt
 var ArtificialTango string
+
+// ArtificialTangoArgs supplies animation defaults before the caller's CLI flags.
+// Explicit CLI values override these defaults through normal flag parsing.
+func ArtificialTangoArgs(cli []string) []string {
+	return append([]string{"--rate", "2pps", "--pkt-size", "1200"}, cli...)
+}

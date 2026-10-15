@@ -17,10 +17,13 @@ type Step struct {
 }
 
 // Parse validates every step before any traffic starts. Common CLI arguments
-// precede each line, so explicit step flags override the common defaults.
+// initialize the parameters. Each line overrides only its explicit flags;
+// all other authored parameters carry forward from previous lines.
 func Parse(r io.Reader, common []string) ([]Step, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	// Reparse authored arguments so derived pattern defaults do not become sticky.
+	current := append([]string{}, common...)
 	var steps []Step
 	line := 0
 	for scanner.Scan() {
@@ -38,7 +41,8 @@ func Parse(r io.Reader, common []string) ([]Step, error) {
 		if len(args) == 0 {
 			return nil, fmt.Errorf("line %d: missing CLI parameters", line)
 		}
-		cfg, err := config.Parse(append(append([]string{}, common...), args...))
+		current = append(current, args...)
+		cfg, err := config.Parse(current)
 		if err != nil {
 			return nil, fmt.Errorf("line %d: %w", line, err)
 		}

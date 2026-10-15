@@ -10,7 +10,7 @@ import (
 )
 
 func TestArtificialTangoScenario(t *testing.T) {
-	steps, err := Parse(strings.NewReader(scenarios.ArtificialTango), []string{"--iface", "eth1", "--encap", "udp4", "--dst", "192.0.2.2"})
+	steps, err := Parse(strings.NewReader(scenarios.ArtificialTango), scenarios.ArtificialTangoArgs([]string{"--iface", "eth1", "--encap", "udp4", "--dst", "192.0.2.2"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,9 +24,25 @@ func TestArtificialTangoScenario(t *testing.T) {
 	}
 	var duration time.Duration
 	for _, step := range steps {
+		if step.Config.RatePps != 2 {
+			t.Errorf("line %d: expected 2 pps, got %d", step.Line, step.Config.RatePps)
+		}
 		duration += step.Config.Duration
 	}
-	if duration != 182760*time.Millisecond {
+	if duration != 183*time.Second {
 		t.Fatalf("duration=%s", duration)
+	}
+}
+
+func TestArtificialTangoCLIOverrides(t *testing.T) {
+	args := scenarios.ArtificialTangoArgs([]string{"--iface", "eth1", "--encap", "udp4", "--dst", "192.0.2.2", "--rate", "3pps", "--pkt-size", "900"})
+	steps, err := Parse(strings.NewReader(scenarios.ArtificialTango), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range steps {
+		if step.Config.RatePps != 3 || step.Config.PktSize != 900 {
+			t.Fatalf("line %d lost CLI values", step.Line)
+		}
 	}
 }

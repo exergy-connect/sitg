@@ -83,7 +83,7 @@ beyond those limits are rejected or ignored. UET/MRC flow state remains until ex
 | `--msg-size` | `32KiB` | Message size (`KiB`/`MiB`/`KB`/`MB`/`K`/`M` suffixes) |
 | `--pkt-size` | `4096` | Payload bytes per packet |
 | `--rate` | `10Gbps` | Send rate (`Gbps`/`Mbps`/`Kbps`/`bps` or `Gpps`/`Mpps`/`Kpps`/`pps`) |
-| `--duration` | `10s` | Run length; sender then drains the window; receiver exits when set |
+| `--duration` | `10s` | Nonnegative integer seconds (`10` or `10s`); sender then drains the window; receiver exits when set |
 | `--window` | `256` | In-flight packet window |
 | `--sack-every` | `16` | Receiver emits a SACK every N data packets |
 | `--rto` | `10ms` | Retransmission timeout (oldest hole; linear then exponential backoff) |
@@ -352,8 +352,10 @@ Example `traffic.txt`:
 --proto mixed --rate 1Kpps --duration 15s --switch-every 100packets
 ```
 
-Flags supplied alongside `--scenario` are shared defaults. Each line overrides
-those flags independently; settings do not carry over from the preceding line.
+Flags supplied alongside `--scenario` initialize the parameters. Each line
+changes only the flags it specifies; all other parameters carry forward from
+the CLI and previous lines. For example, after `--rate 2pps --duration 8s`, a
+line containing only `--proto falcon` keeps that rate and duration.
 All steps are validated before traffic starts. Steps run in file order, each
 finishing its session and closing its socket before the next starts. Errors
 stop playback and identify the file and line. Ctrl-C stops playback. An unlimited
