@@ -3,6 +3,7 @@
 package link
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
@@ -23,8 +24,9 @@ type Endpoint struct {
 
 // Socket is an AF_PACKET raw socket bound to an interface.
 type Socket struct {
-	fd int
-	ep *Endpoint
+	fd  int
+	ep  *Endpoint
+	udp []*net.UDPConn
 }
 
 // ResolveEndpoint looks up the interface and its addresses.
@@ -107,7 +109,57 @@ func OpenSocket(ep *Endpoint, ipProto uint8) (*Socket, error) {
 
 func (s *Socket) Endpoint() *Endpoint { return s.ep }
 
+// ReserveUDP prevents the host UDP stack from rejecting traffic handled by
+// AF_PACKET. Connections are scoped to local addresses and owned by Socket.
+func (s *Socket) ReserveUDP(addresses []netip.Addr, ports []int) error {
+	var opened []*net.UDPConn
+	for _, ip := range addresses {
+		network := "udp6"
+		if ip.Is4() {
+			network = "udp4"
+		}
+		for _, port := range ports {
+			conn, err := listenUDPDiscard(network, netip.AddrPortFrom(ip, uint16(port)).String())
+			if err != nil {
+				for _, c := range opened {
+					_ = c.Close()
+				}
+				return fmt.Errorf("reserve %s UDP port %d: %w", ip, port, err)
+			}
+			opened = append(opened, conn)
+		}
+	}
+	s.udp = append(s.udp, opened...)
+
+	return nil
+}
+
+// listenUDPDiscard binds a UDP endpoint whose socket filter rejects every
+// datagram before queueing. The endpoint prevents ICMP port-unreachable;
+// AF_PACKET independently receives the original frame. No drain loop is needed.
+func listenUDPDiscard(network, address string) (*net.UDPConn, error) {
+	lc := net.ListenConfig{Control: func(_, _ string, raw syscall.RawConn) error {
+		var filterErr error
+		if err := raw.Control(func(fd uintptr) {
+			filter := []unix.SockFilter{{Code: unix.BPF_RET | unix.BPF_K, K: 0}}
+			filterErr = unix.SetsockoptSockFprog(int(fd), unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{Len: 1, Filter: &filter[0]})
+		}); err != nil {
+			return err
+		}
+		return filterErr
+	}}
+	conn, err := lc.ListenPacket(context.Background(), network, address)
+	if err != nil {
+		return nil, err
+	}
+	return conn.(*net.UDPConn), nil
+}
+
 func (s *Socket) Close() error {
+	for _, c := range s.udp {
+		_ = c.Close()
+	}
+	s.udp = nil
 	if s.fd >= 0 {
 		err := unix.Close(s.fd)
 		s.fd = -1

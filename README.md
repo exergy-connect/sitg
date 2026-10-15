@@ -108,6 +108,8 @@ beyond those limits are rejected or ignored. UET/MRC flow state remains until ex
 
 UET uses preconfigured symmetric 16-bit PDC IDs (`--qp`, at most 65535), rather than negotiating PDC establishment. SES message IDs wrap at 16 bits. Requests carry message boundaries, offsets, lengths, and the retransmission flag. ACK_CC translates the internal next-expected counter to UET's inclusive CACK and uses an aligned 64-bit SACK window; higher selective bits wait for a later ACK. The congestion state is idle NSCC; this is not a full UET congestion-control implementation. Both endpoints must use the updated wire format; older SITG private UET packets are incompatible.
 
+SITG binds the selected protocol UDP ports on its local interface addresses on both senders and receivers, attaching a drop-all UDP socket filter while AF_PACKET processes the frames. The filter discards kernel copies before queueing, so no drain goroutines or userspace receive buffers are needed. This prevents kernel-generated ICMP port-unreachable replies. Port conflicts fail at startup, and the bindings are released on exit.
+
 UET over UDP uses UDP source port as entropy and sets the UDP checksum to `0`. Native UET places a 4-byte entropy header after the IP header; configure the IP protocol with `--ip-proto` (default `253` until IANA assigns one).
 
 MRC and Falcon require `udp6` or `udp4`.

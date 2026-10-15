@@ -56,6 +56,22 @@ func New(cfg *config.Config, sock *link.Socket) (*Engine, error) {
 		}
 		e.paths = paths
 	}
+	// Both data receivers and ACK receivers need kernel UDP endpoints.
+	if cfg.Encap == config.EncapUDP4 || cfg.Encap == config.EncapUDP6 || cfg.Encap == config.EncapAll {
+		var ports []int
+		if cfg.Proto == config.ProtoUET || cfg.Proto == config.ProtoMixed || cfg.Proto == config.ProtoAll {
+			ports = append(ports, wire.UETUDPPort)
+		}
+		if cfg.Proto == config.ProtoMRC || cfg.Proto == config.ProtoMixed || cfg.Proto == config.ProtoAll {
+			ports = append(ports, wire.MRCUDPPort)
+		}
+		if cfg.Proto == config.ProtoFalcon || cfg.Proto == config.ProtoMixed || cfg.Proto == config.ProtoAll {
+			ports = append(ports, wire.FalconUDPPort)
+		}
+		if err := sock.ReserveUDP(e.receiverIPs(), ports); err != nil {
+			return nil, err
+		}
+	}
 	return e, nil
 }
 
