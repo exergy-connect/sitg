@@ -26,7 +26,12 @@ func (s *delayedACKSocket) Send(raw []byte) error {
 	if err != nil {
 		return err
 	}
-	s.ack, err = wire.BuildUETFrame(wire.BuildOpts{Encap: "udp4", SrcIP: f.DstIP, DstIP: f.SrcIP}, wire.EncodeUETSACK(f.QP, f.PSN+1, 0))
+	opts := wire.BuildOpts{Encap: "udp4", SrcIP: f.DstIP, DstIP: f.SrcIP}
+	if f.Proto == "mrc" {
+		s.ack, err = wire.BuildMRCFrame(opts, wire.EncodeMRCSACK(f.QP, f.PSN+1, 0))
+	} else {
+		s.ack, err = wire.BuildUETFrame(opts, wire.EncodeUETSACK(f.QP, f.PSN+1, 0))
+	}
 	if f.PSN%2 == 1 {
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -42,7 +47,14 @@ func (s *delayedACKSocket) Recv(buf []byte) (int, error) {
 }
 
 func TestSenderAppliesQueuedACKBeforeExpiredTimer(t *testing.T) {
-	cfg, err := config.Parse([]string{"--iface", "lo", "--encap", "udp4", "--dst", "127.0.0.2", "--dst-mac", "00:00:00:00:00:00", "--window", "2", "--pkt-size", "32", "--msg-size", "64", "--rto", "100us", "--duration", "20ms", "--rate", "1Mbps"})
+	for _, proto := range []string{"uet", "mrc"} {
+		t.Run(proto, func(t *testing.T) { testQueuedACKBeforeExpiredTimer(t, proto) })
+	}
+}
+
+func testQueuedACKBeforeExpiredTimer(t *testing.T, proto string) {
+	t.Helper()
+	cfg, err := config.Parse([]string{"--proto", proto, "--iface", "lo", "--encap", "udp4", "--dst", "127.0.0.2", "--dst-mac", "00:00:00:00:00:00", "--window", "2", "--pkt-size", "32", "--msg-size", "64", "--rto", "100us", "--duration", "20ms", "--rate", "1Mbps"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -80,7 +80,7 @@ func (e *Engine) runFalconSend(ctx context.Context) error {
 		scratch[i] = byte(i)
 	}
 	path := 0
-	tokens := float64(e.cfg.RateBps) * 0.01
+	tokens := e.rateTokens() * 0.01
 	lastRefill := time.Now()
 	var drainDeadline time.Time
 	var current *falconConnection
@@ -108,7 +108,7 @@ func (e *Engine) runFalconSend(ctx context.Context) error {
 			pkt.SentAt = time.Now()
 			c.window.Track(pkt)
 		}
-		tokens -= float64(len(frame) * 8)
+		tokens -= e.packetCost(len(frame))
 		path++
 		return nil
 	}
@@ -146,7 +146,7 @@ func (e *Engine) runFalconSend(ctx context.Context) error {
 			}
 		}
 		now := time.Now()
-		tokens = min(tokens+now.Sub(lastRefill).Seconds()*float64(e.cfg.RateBps), max(float64(e.cfg.RateBps)*0.01, float64((e.cfg.PktSize+256)*8)))
+		tokens = min(tokens+now.Sub(lastRefill).Seconds()*e.rateTokens(), max(e.rateTokens()*0.01, e.packetCost(e.cfg.PktSize+256)))
 		lastRefill = now
 		if !now.Before(deadline) && drainDeadline.IsZero() {
 			drainDeadline = now.Add(e.cfg.ConnectTimeout)
@@ -161,7 +161,7 @@ func (e *Engine) runFalconSend(ctx context.Context) error {
 			if !c.window.Empty() {
 				empty = false
 			}
-			if pkt := c.window.OldestExpired(now); pkt != nil && tokens >= float64(pkt.Bytes*8) {
+			if pkt := c.window.OldestExpired(now); pkt != nil && tokens >= e.packetCost(pkt.Bytes) {
 				if err := send(c, pkt, true); err != nil {
 					return err
 				}
@@ -184,7 +184,7 @@ func (e *Engine) runFalconSend(ctx context.Context) error {
 			offset = 0
 		}
 		chunk := min(current.payload, msgSize-offset)
-		if !current.window.CanSend() || tokens < float64(chunk*8) {
+		if !current.window.CanSend() || tokens < e.packetCost(chunk) {
 			time.Sleep(10 * time.Microsecond)
 			continue
 		}

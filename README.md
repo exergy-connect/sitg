@@ -52,8 +52,8 @@ Native UET uses the configured `--ip-proto` (default `253`).
 
 `--proto all` implies `--encap all` unless an explicit encapsulation is provided.
 Use `--proto all --encap udp6` to restrict the wire format, or
-`--proto uet --encap all` to receive all UET variants. Senders select one concrete
-protocol and encapsulation. `--duration 0s` keeps the receiver running until SIGINT.
+`--proto uet --encap all` to receive all UET variants. Senders select one concrete encapsulation and either a single protocol or
+`mixed` (UDP only). `--duration 0s` keeps the receiver running until SIGINT.
 
 `--qp` still selects the UET/MRC QP and Falcon CM service. Reliability state is
 separate for each protocol, encapsulation, peer, local IP, QP and plain/SRv6
@@ -72,7 +72,8 @@ beyond those limits are rejected or ignored. UET/MRC flow state remains until ex
 |------|---------|-------------|
 | `--role` | `send` | `send` or `recv` |
 | `--iface` | *(required)* | Network interface for AF_PACKET |
-| `--proto` | `uet` | `uet`, `mrc`, `falcon`, or `all` (receiver only) |
+| `--proto` | `uet` | `uet`, `mrc`, `falcon`, `mixed` (sender), or `all` (receiver) |
+| `--switch-every` | `1s` | Mixed sender switches after this duration, packet count, or payload size |
 | `--encap` | `udp6` | Encapsulation; `all` for receivers (implicit with `--proto all`) |
 | `--ip-proto` | `253` | IPv4 protocol / IPv6 next-header for native UET |
 | `--dst` | | Destination IP (sender; required for most patterns) |
@@ -81,7 +82,7 @@ beyond those limits are rejected or ignored. UET/MRC flow state remains until ex
 | `--peers` | | Comma-separated peer IPs for `outcast` / `alltoall` |
 | `--msg-size` | `32KiB` | Message size (`KiB`/`MiB`/`KB`/`MB`/`K`/`M` suffixes) |
 | `--pkt-size` | `4096` | Payload bytes per packet |
-| `--rate` | `10Gbps` | Send rate (`Gbps`/`Mbps`/`Kbps`/`bps`) |
+| `--rate` | `10Gbps` | Send rate (`Gbps`/`Mbps`/`Kbps`/`bps` or `Gpps`/`Mpps`/`Kpps`/`pps`) |
 | `--duration` | `10s` | Run length; sender then drains the window; receiver exits when set |
 | `--window` | `256` | In-flight packet window |
 | `--sack-every` | `16` | Receiver emits a SACK every N data packets |
@@ -145,7 +146,7 @@ sudo ./sitg --role recv --iface eth0 --proto mrc --encap udp6 --qp 7 --duration 
 
 sudo ./sitg --role send --iface eth0 --proto mrc --encap udp6 \
   --dst 2001:db8::20 \
-  --pattern elephant --rate 200Gbps --window 512 --rto 2ms --qp 7 --duration 60s
+  --pattern elephant --rate 200Gbps --window 512 --qp 7 --duration 60s
 ```
 
 ### OCP Falcon lab traffic
@@ -193,6 +194,41 @@ congestion control are not implemented. Falcon has no RTX flag, so retransmissio
 retain the original PSN and do not increment RTX-flagged stats. EACK translates
 the selective window into Falcon's base-relative 128-bit data ACK/Rx bitmaps;
 request-window and congestion metadata remain zero.
+
+### Alternating UET, Falcon, and MRC
+
+Use `--proto mixed` to cycle **UET → Falcon → MRC → UET** over UDP4 or
+UDP6. Start a receiver with `--proto all` and the same `--qp` first.
+
+```bash
+sudo ./sitg --role recv --iface eth0 --proto all --qp 1 --duration 0s
+sudo ./sitg --role send --iface eth0 --proto mixed --encap udp4 \
+  --dst 192.0.2.2 --qp 1 --pkt-size 1200 --rate 100Mbps \
+  --duration 30s --switch-every 100packets
+```
+
+`--switch-every` applies to each protocol phase:
+
+| Value | Switch after |
+|-------|--------------|
+| `1s`, `250ms` | Elapsed time since the phase started |
+| `100packets` (or `100pkts`) | 100 new data packets |
+| `1Mb` | 1,000,000 payload bits (125,000 bytes) |
+| `1MB` | 1,000,000 payload bytes |
+| `1MiB` | 1,048,576 payload bytes |
+
+Bit/byte suffixes are case-sensitive. Bit thresholds round up to whole bytes;
+the last packet is shortened to meet a size threshold exactly. Packet and size
+counts aggregate across peers and exclude headers, ACKs, and retries. Time
+switches occur when the sender loop next runs, so scheduling can delay them.
+
+Each protocol and peer retains independent sequence windows and message offsets
+across switches. Falcon setup completes for every peer before the traffic clock
+starts, and negotiated payload/window limits apply. Only new traffic switches:
+outstanding packets from earlier phases can still be retried and acknowledged.
+`--rate` is shared across protocols and retries. `--duration` ends new traffic,
+then all windows drain with `--connect-timeout` as the deadline. The final report
+includes original packet counts, payload bytes, and retries for each protocol.
 
 ### Native UET (no UDP)
 
@@ -291,3 +327,45 @@ RTO allows for ACK batching and userspace scheduling; tune `--rto` to your lab.
 - IP fragmentation is not used; keep `--pkt-size` within the path MTU after headers (and SRv6 outer header when enabled).
 - Reliability is a simplified window + SACK + RTO model for traffic generation, not full UET CMS/PDS or MRC congestion control.
 - Non-Linux builds compile stub link code but cannot inject packets.
+
+Packet rates such as `--rate 1000pps` count each transmitted data packet once, regardless of packet size. Falcon and mixed mode also count retransmissions against the rate.
+
+## Traffic scenarios
+
+Run a sequence of traffic steps from a text file:
+
+```sh
+sitg --scenario traffic.txt --iface eth1 --encap udp4 --dst 192.0.2.2
+```
+
+Each nonempty line contains CLI parameters for one session. Blank lines and
+`#` comment lines are skipped; inline comments at word boundaries are also
+supported. A line may optionally begin with `sitg`. Single and double quotes
+and backslash escapes are supported; shell substitutions are not expanded.
+
+Example `traffic.txt`:
+
+```text
+# Start slowly, then increase load
+--proto uet --rate 100pps --duration 5s
+--proto falcon --rate "10Mbps" --duration 10s # Falcon phase
+--proto mixed --rate 1Kpps --duration 15s --switch-every 100packets
+```
+
+Flags supplied alongside `--scenario` are shared defaults. Each line overrides
+those flags independently; settings do not carry over from the preceding line.
+All steps are validated before traffic starts. Steps run in file order, each
+finishing its session and closing its socket before the next starts. Errors
+stop playback and identify the file and line. Ctrl-C stops playback. An unlimited
+receiver (`--duration 0s`) stays on that step until interrupted.
+Use `--scenario -` to read from standard input.
+
+The Artificial Tango choreography is built into the binary; no scenario file
+is needed:
+
+```sh
+sitg --scenario artificial-tango --iface eth1 --encap udp4 --dst 192.0.2.2
+```
+
+See [the scenario notes](scenarios/README.md) for receiver setup and approximate
+song timing. A custom file can still be passed to `--scenario`.

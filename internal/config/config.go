@@ -3,6 +3,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"strconv"
@@ -24,6 +25,7 @@ const (
 	ProtoMRC    Proto = "mrc"
 	ProtoFalcon Proto = "falcon"
 	ProtoAll    Proto = "all"
+	ProtoMixed  Proto = "mixed"
 )
 
 type Encap string
@@ -67,6 +69,7 @@ type Config struct {
 	MsgSize        int
 	PktSize        int
 	RateBps        uint64
+	RatePps        uint64
 	Duration       time.Duration
 	Window         int
 	SackEvery      int
@@ -79,6 +82,7 @@ type Config struct {
 	USIDBase       uint16
 	QP             uint32
 	FalconCMPort   int
+	SwitchEvery    SwitchLimit
 	ConnectTimeout time.Duration
 }
 
@@ -88,8 +92,9 @@ func Parse(args []string) (*Config, error) {
 	role := fs.String("role", "send", "role: send|recv")
 	iface := fs.String("iface", "", "network interface (required)")
 	cmPort := fs.Int("falcon-cm-port", 4795, "TCP port for SITG Falcon connection management")
-	connectTimeout := fs.Duration("connect-timeout", 5*time.Second, "Falcon setup and drain timeout")
-	proto := fs.String("proto", "uet", "protocol: uet|mrc|falcon|all (all: receiver only)")
+	connectTimeout := fs.Duration("connect-timeout", 5*time.Second, "connection setup and final window-drain timeout")
+	proto := fs.String("proto", "uet", "protocol: uet|mrc|falcon|mixed (sender)|all (receiver)")
+	switchEvery := fs.String("switch-every", "1s", "mixed sender switch threshold: duration, packets (100packets), bits (1Mb), or bytes (1MB)")
 	encap := fs.String("encap", "udp6", "encapsulation: udp6|udp4|ip6|ip4|all (all: receiver only)")
 	ipProto := fs.Int("ip-proto", 253, "IP protocol / next-header for native UET")
 	dst := fs.String("dst", "", "destination IP address")
@@ -98,7 +103,7 @@ func Parse(args []string) (*Config, error) {
 	peers := fs.String("peers", "", "comma-separated peer IPs for outcast/alltoall")
 	msgSize := fs.String("msg-size", "32KiB", "message size")
 	pktSize := fs.String("pkt-size", "4096", "payload bytes per packet")
-	rate := fs.String("rate", "10Gbps", "send rate")
+	rate := fs.String("rate", "10Gbps", "send rate: bps/Kbps/Mbps/Gbps or pps/Kpps/Mpps/Gpps")
 	duration := fs.Duration("duration", 10*time.Second, "run duration")
 	window := fs.Int("window", 256, "in-flight packet window")
 	sackEvery := fs.Int("sack-every", 16, "receiver emits SACK every N data packets")
@@ -113,6 +118,10 @@ func Parse(args []string) (*Config, error) {
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
+	}
+
+	if fs.NArg() != 0 {
+		return nil, fmt.Errorf("unexpected arguments: %v", fs.Args())
 	}
 
 	// All protocols implies all encapsulations unless explicitly restricted.
@@ -148,13 +157,25 @@ func Parse(args []string) (*Config, error) {
 	}
 
 	var err error
+	if cfg.SwitchEvery, err = parseSwitchLimit(*switchEvery); err != nil {
+		return nil, fmt.Errorf("switch-every: %w", err)
+	}
 	if cfg.MsgSize, err = parseSize(*msgSize); err != nil {
 		return nil, fmt.Errorf("msg-size: %w", err)
 	}
 	if cfg.PktSize, err = parseSize(*pktSize); err != nil {
 		return nil, fmt.Errorf("pkt-size: %w", err)
 	}
-	if cfg.RateBps, err = parseRate(*rate); err != nil {
+	rateText := strings.TrimSpace(*rate)
+	if strings.HasSuffix(strings.ToUpper(rateText), "PPS") {
+		cfg.RatePps, err = parseRate(rateText[:len(rateText)-3] + "bps")
+		if err == nil && cfg.RatePps == 0 {
+			err = fmt.Errorf("packet rate must be at least 1 pps")
+		}
+	} else {
+		cfg.RateBps, err = parseRate(rateText)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("rate: %w", err)
 	}
 	if cfg.USIDBase, err = parseUint16(*usidBase); err != nil {
@@ -210,9 +231,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("--iface is required")
 	}
 	switch c.Proto {
-	case ProtoUET, ProtoMRC, ProtoFalcon, ProtoAll:
+	case ProtoUET, ProtoMRC, ProtoFalcon, ProtoAll, ProtoMixed:
 	default:
-		return fmt.Errorf("proto must be uet, mrc, falcon, or all")
+		return fmt.Errorf("proto must be uet, mrc, falcon, mixed, or all")
 	}
 	switch c.Encap {
 	case EncapUDP6, EncapUDP4, EncapIP6, EncapIP4, EncapAll:
@@ -222,14 +243,17 @@ func (c *Config) Validate() error {
 	if c.Role != RoleRecv && (c.Proto == ProtoAll || c.Encap == EncapAll) {
 		return fmt.Errorf("all protocols/encapsulations require --role recv")
 	}
-	if (c.Proto == ProtoMRC || c.Proto == ProtoFalcon) && (c.Encap == EncapIP6 || c.Encap == EncapIP4) {
+	if (c.Proto == ProtoMRC || c.Proto == ProtoFalcon || c.Proto == ProtoMixed) && (c.Encap == EncapIP6 || c.Encap == EncapIP4) {
 		return fmt.Errorf("%s requires udp6 or udp4 encapsulation", c.Proto)
 	}
-	if (c.Proto == ProtoFalcon || c.Proto == ProtoAll) && c.QP > 0xffffff {
+	if (c.Proto == ProtoFalcon || c.Proto == ProtoAll || c.Proto == ProtoMixed) && c.QP > 0xffffff {
 		return fmt.Errorf("falcon connection ID (--qp) must fit in 24 bits")
 	}
-	if (c.Proto == ProtoFalcon || c.Proto == ProtoAll) && (c.FalconCMPort < 1 || c.FalconCMPort > 65535 || c.ConnectTimeout <= 0) {
+	if (c.Proto == ProtoFalcon || c.Proto == ProtoAll || c.Proto == ProtoMixed) && (c.FalconCMPort < 1 || c.FalconCMPort > 65535 || c.ConnectTimeout <= 0) {
 		return fmt.Errorf("falcon requires a valid --falcon-cm-port and positive --connect-timeout")
+	}
+	if c.Proto == ProtoMixed && (c.Role != RoleSend || c.SwitchEvery == (SwitchLimit{})) {
+		return fmt.Errorf("mixed requires --role send and a positive --switch-every threshold")
 	}
 	switch c.Pattern {
 	case PatternP2P, PatternElephant, PatternMice, PatternOutcast, PatternAllToAll:
@@ -351,7 +375,11 @@ func parseRate(s string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return uint64(f * float64(mult)), nil
+	value := f * float64(mult)
+	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value >= math.Exp2(64) {
+		return 0, fmt.Errorf("rate out of range")
+	}
+	return uint64(value), nil
 }
 
 func parseUint16(s string) (uint16, error) {

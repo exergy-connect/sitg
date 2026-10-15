@@ -63,6 +63,11 @@ func (e *Engine) Run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	return e.RunContext(ctx)
+}
+
+// RunContext runs a session until completion or cancellation.
+func (e *Engine) RunContext(ctx context.Context) error {
 	if e.cfg.Role == config.RoleSend {
 		return e.runSend(ctx)
 	}
@@ -171,6 +176,9 @@ func (e *Engine) buildFrame(opts wire.BuildOpts, transport []byte) ([]byte, erro
 }
 
 func (e *Engine) runSend(ctx context.Context) error {
+	if e.cfg.Proto == config.ProtoMixed {
+		return e.runMixedSend(ctx)
+	}
 	if e.cfg.Proto == config.ProtoFalcon {
 		return e.runFalconSend(ctx)
 	}
@@ -198,7 +206,7 @@ func (e *Engine) runSend(ctx context.Context) error {
 		payloadScratch[i] = byte(i)
 	}
 
-	tokens := float64(e.cfg.RateBps)
+	tokens := e.rateTokens()
 	lastRefill := time.Now()
 	draining := false
 
@@ -261,8 +269,8 @@ func (e *Engine) runSend(ctx context.Context) error {
 		now := time.Now()
 		elapsed := now.Sub(lastRefill).Seconds()
 		if elapsed > 0 {
-			tokens += elapsed * float64(e.cfg.RateBps)
-			maxBurst := float64(e.cfg.RateBps) * 0.01
+			tokens += elapsed * e.rateTokens()
+			maxBurst := max(e.rateTokens()*0.01, e.packetCost(e.cfg.PktSize+256))
 			if tokens > maxBurst {
 				tokens = maxBurst
 			}
@@ -289,13 +297,13 @@ func (e *Engine) runSend(ctx context.Context) error {
 			haveMsg = true
 		}
 
-		if !win.CanSend() || tokens < float64(e.cfg.PktSize*8) {
+		if !win.CanSend() || tokens < e.packetCost(e.cfg.PktSize) {
 			time.Sleep(10 * time.Microsecond)
 			continue
 		}
 
 		for curOffset < curMsgSize {
-			if !win.CanSend() || tokens < float64(e.cfg.PktSize*8) {
+			if !win.CanSend() || tokens < e.packetCost(e.cfg.PktSize) {
 				break
 			}
 			if time.Now().After(deadline) {
@@ -335,7 +343,7 @@ func (e *Engine) runSend(ctx context.Context) error {
 			})
 			e.stats.PacketsSent.Add(1)
 			e.stats.BytesSent.Add(uint64(chunk))
-			tokens -= float64(len(frame) * 8)
+			tokens -= e.packetCost(len(frame))
 			pathIdx++
 			curOffset += chunk
 		}
