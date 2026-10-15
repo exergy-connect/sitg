@@ -129,6 +129,9 @@ func TestSRv6OuterWithInnerIPv4(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if f.SrcIP != opts.SrcIP || f.DstIP != opts.DstIP {
+		t.Fatalf("inner endpoints changed: %s -> %s", f.SrcIP, f.DstIP)
+	}
 	if !f.OuterSRv6 || f.Proto != "mrc" {
 		t.Fatalf("%+v", f)
 	}

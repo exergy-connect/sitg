@@ -20,13 +20,16 @@ const (
 type Proto string
 
 const (
-	ProtoUET Proto = "uet"
-	ProtoMRC Proto = "mrc"
+	ProtoUET    Proto = "uet"
+	ProtoMRC    Proto = "mrc"
+	ProtoFalcon Proto = "falcon"
+	ProtoAll    Proto = "all"
 )
 
 type Encap string
 
 const (
+	EncapAll  Encap = "all"
 	EncapUDP6 Encap = "udp6"
 	EncapUDP4 Encap = "udp4"
 	EncapIP6  Encap = "ip6"
@@ -52,29 +55,31 @@ const (
 
 // Config holds all CLI parameters for a sitg session.
 type Config struct {
-	Role     Role
-	Iface    string
-	Proto    Proto
-	Encap    Encap
-	IPProto  uint8
-	Dst      netip.Addr
-	DstMAC   net.HardwareAddr
-	Pattern  Pattern
-	Peers    []netip.Addr
-	MsgSize  int
-	PktSize  int
-	RateBps  uint64
-	Duration time.Duration
-	Window   int
-	SackEvery int
-	RTO      time.Duration
-	Entropy  EntropyMode
-	Locator  netip.Addr
-	Paths    int
-	Hops     int
-	Radix    int
-	USIDBase uint16
-	QP       uint32
+	Role           Role
+	Iface          string
+	Proto          Proto
+	Encap          Encap
+	IPProto        uint8
+	Dst            netip.Addr
+	DstMAC         net.HardwareAddr
+	Pattern        Pattern
+	Peers          []netip.Addr
+	MsgSize        int
+	PktSize        int
+	RateBps        uint64
+	Duration       time.Duration
+	Window         int
+	SackEvery      int
+	RTO            time.Duration
+	Entropy        EntropyMode
+	Locator        netip.Addr
+	Paths          int
+	Hops           int
+	Radix          int
+	USIDBase       uint16
+	QP             uint32
+	FalconCMPort   int
+	ConnectTimeout time.Duration
 }
 
 func Parse(args []string) (*Config, error) {
@@ -82,8 +87,10 @@ func Parse(args []string) (*Config, error) {
 
 	role := fs.String("role", "send", "role: send|recv")
 	iface := fs.String("iface", "", "network interface (required)")
-	proto := fs.String("proto", "uet", "protocol: uet|mrc")
-	encap := fs.String("encap", "udp6", "encapsulation: udp6|udp4|ip6|ip4")
+	cmPort := fs.Int("falcon-cm-port", 4795, "TCP port for SITG Falcon connection management")
+	connectTimeout := fs.Duration("connect-timeout", 5*time.Second, "Falcon setup and drain timeout")
+	proto := fs.String("proto", "uet", "protocol: uet|mrc|falcon|all (all: receiver only)")
+	encap := fs.String("encap", "udp6", "encapsulation: udp6|udp4|ip6|ip4|all (all: receiver only)")
 	ipProto := fs.Int("ip-proto", 253, "IP protocol / next-header for native UET")
 	dst := fs.String("dst", "", "destination IP address")
 	dstMAC := fs.String("dst-mac", "", "destination MAC (optional if neighbor known)")
@@ -108,22 +115,36 @@ func Parse(args []string) (*Config, error) {
 		return nil, err
 	}
 
+	// All protocols implies all encapsulations unless explicitly restricted.
+	if Proto(*proto) == ProtoAll {
+		explicit := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "encap" {
+				explicit = true
+			}
+		})
+		if !explicit {
+			*encap = string(EncapAll)
+		}
+	}
 	cfg := &Config{
-		Role:      Role(*role),
-		Iface:     *iface,
-		Proto:     Proto(*proto),
-		Encap:     Encap(*encap),
-		IPProto:   uint8(*ipProto),
-		Pattern:   Pattern(*pattern),
-		Window:    *window,
-		SackEvery: *sackEvery,
-		RTO:       *rto,
-		Entropy:   EntropyMode(*entropy),
-		Paths:     *paths,
-		Hops:      *hops,
-		Radix:     *radix,
-		QP:        uint32(*qp),
-		Duration:  *duration,
+		Role:           Role(*role),
+		Iface:          *iface,
+		Proto:          Proto(*proto),
+		FalconCMPort:   *cmPort,
+		ConnectTimeout: *connectTimeout,
+		Encap:          Encap(*encap),
+		IPProto:        uint8(*ipProto),
+		Pattern:        Pattern(*pattern),
+		Window:         *window,
+		SackEvery:      *sackEvery,
+		RTO:            *rto,
+		Entropy:        EntropyMode(*entropy),
+		Paths:          *paths,
+		Hops:           *hops,
+		Radix:          *radix,
+		QP:             uint32(*qp),
+		Duration:       *duration,
 	}
 
 	var err error
@@ -189,17 +210,26 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("--iface is required")
 	}
 	switch c.Proto {
-	case ProtoUET, ProtoMRC:
+	case ProtoUET, ProtoMRC, ProtoFalcon, ProtoAll:
 	default:
-		return fmt.Errorf("proto must be uet or mrc")
+		return fmt.Errorf("proto must be uet, mrc, falcon, or all")
 	}
 	switch c.Encap {
-	case EncapUDP6, EncapUDP4, EncapIP6, EncapIP4:
+	case EncapUDP6, EncapUDP4, EncapIP6, EncapIP4, EncapAll:
 	default:
-		return fmt.Errorf("encap must be udp6, udp4, ip6, or ip4")
+		return fmt.Errorf("encap must be udp6, udp4, ip6, ip4, or all")
 	}
-	if c.Proto == ProtoMRC && (c.Encap == EncapIP6 || c.Encap == EncapIP4) {
-		return fmt.Errorf("mrc requires udp6 or udp4 encapsulation")
+	if c.Role != RoleRecv && (c.Proto == ProtoAll || c.Encap == EncapAll) {
+		return fmt.Errorf("all protocols/encapsulations require --role recv")
+	}
+	if (c.Proto == ProtoMRC || c.Proto == ProtoFalcon) && (c.Encap == EncapIP6 || c.Encap == EncapIP4) {
+		return fmt.Errorf("%s requires udp6 or udp4 encapsulation", c.Proto)
+	}
+	if (c.Proto == ProtoFalcon || c.Proto == ProtoAll) && c.QP > 0xffffff {
+		return fmt.Errorf("falcon connection ID (--qp) must fit in 24 bits")
+	}
+	if (c.Proto == ProtoFalcon || c.Proto == ProtoAll) && (c.FalconCMPort < 1 || c.FalconCMPort > 65535 || c.ConnectTimeout <= 0) {
+		return fmt.Errorf("falcon requires a valid --falcon-cm-port and positive --connect-timeout")
 	}
 	switch c.Pattern {
 	case PatternP2P, PatternElephant, PatternMice, PatternOutcast, PatternAllToAll:

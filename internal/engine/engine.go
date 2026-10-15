@@ -16,10 +16,16 @@ import (
 	"github.com/jbemmel/sitg/internal/wire"
 )
 
+type packetSocket interface {
+	Send([]byte) error
+	Recv([]byte) (int, error)
+	SetNonblock(bool) error
+}
+
 // Engine runs a send or recv session.
 type Engine struct {
 	cfg    *config.Config
-	sock   *link.Socket
+	sock   packetSocket
 	ep     *link.Endpoint
 	stats  *Stats
 	paths  []netip.Addr
@@ -37,7 +43,7 @@ func New(cfg *config.Config, sock *link.Socket) (*Engine, error) {
 		dstMAC: make(map[netip.Addr]net.HardwareAddr),
 		sel:    pattern.New(cfg),
 	}
-	if cfg.Entropy == config.EntropySRv6 {
+	if cfg.Role == config.RoleSend && cfg.Entropy == config.EntropySRv6 {
 		paths, err := wire.AllPaths(wire.PathParams{
 			Locator:  cfg.Locator,
 			Paths:    cfg.Paths,
@@ -147,6 +153,9 @@ func (e *Engine) buildFrame(opts wire.BuildOpts, transport []byte) ([]byte, erro
 }
 
 func (e *Engine) runSend(ctx context.Context) error {
+	if e.cfg.Proto == config.ProtoFalcon {
+		return e.runFalconSend(ctx)
+	}
 	win := NewSendWindow(e.cfg.Window, e.cfg.RTO)
 	deadline := time.Now().Add(e.cfg.Duration)
 	ticker := time.NewTicker(time.Second)
@@ -210,7 +219,7 @@ func (e *Engine) runSend(ctx context.Context) error {
 				return err
 			}
 			f, err := wire.ParseEthernetFrame(recvBuf[:n], e.cfg.IPProto)
-			if err != nil || f.Type != wire.TypeSACK || f.QP != e.cfg.QP {
+			if err != nil || f.Type != wire.TypeSACK || f.QP != e.cfg.QP || f.Proto != string(e.cfg.Proto) {
 				continue
 			}
 			e.stats.MarkStart()
@@ -346,136 +355,7 @@ func (e *Engine) retransmit(pkt *Inflight, pathIdx *int, entropyBase uint16, win
 }
 
 func (e *Engine) runRecv(ctx context.Context) error {
-	tracker := NewRecvTracker()
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	sackTimer := time.NewTicker(500 * time.Microsecond)
-	defer sackTimer.Stop()
-
-	recvBuf := make([]byte, 65536)
-	_ = e.sock.SetNonblock(true)
-
-	pktsSinceSACK := 0
-	var lastSrc netip.Addr
-	var lastEntropy uint16
-	var lastMAC net.HardwareAddr
-
-	var deadline <-chan time.Time
-	if e.cfg.Duration > 0 {
-		t := time.NewTimer(e.cfg.Duration)
-		defer t.Stop()
-		deadline = t.C
-	}
-
-	var sendSACKFn func() error
-	finish := func() error {
-		_ = sendSACKFn()
-		e.stats.MarkEnd()
-		fmt.Fprintln(os.Stderr, e.stats.ProgressLine())
-		fmt.Fprint(os.Stderr, e.stats.FinalReport())
-		return nil
-	}
-
-	sendSACKFn = func() error {
-		cum, bm, gaps := tracker.Snapshot()
-		e.stats.GapsOpen.Store(uint64(gaps))
-		if !lastSrc.IsValid() {
-			return nil
-		}
-		transport := e.encodeSACK(cum, bm)
-		src, err := e.srcIP()
-		if err != nil {
-			return err
-		}
-		mac := lastMAC
-		if mac == nil {
-			mac, err = e.resolveMAC(lastSrc)
-			if err != nil {
-				return err
-			}
-		}
-		opts := wire.BuildOpts{
-			SrcMAC:   e.ep.SrcMAC,
-			DstMAC:   mac,
-			SrcIP:    src,
-			DstIP:    lastSrc,
-			Encap:    string(e.cfg.Encap),
-			IPProto:  e.cfg.IPProto,
-			Entropy:  lastEntropy,
-			HopLimit: 64,
-		}
-		frame, err := e.buildFrame(opts, transport)
-		if err != nil {
-			return err
-		}
-		if err := e.sock.Send(frame); err != nil {
-			return err
-		}
-		e.stats.SACKsSent.Add(1)
-		pktsSinceSACK = 0
-		return nil
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return finish()
-		case <-deadline:
-			return finish()
-		case <-ticker.C:
-			fmt.Fprintln(os.Stderr, e.stats.ProgressLine())
-		case <-sackTimer.C:
-			if pktsSinceSACK > 0 {
-				if err := sendSACKFn(); err != nil {
-					return err
-				}
-			}
-		default:
-		}
-
-		n, err := e.sock.Recv(recvBuf)
-		if err != nil {
-			if isTimeout(err) || isWouldBlock(err) {
-				time.Sleep(10 * time.Microsecond)
-				continue
-			}
-			return err
-		}
-		f, err := wire.ParseEthernetFrame(recvBuf[:n], e.cfg.IPProto)
-		if err != nil || f.Type != wire.TypeData {
-			continue
-		}
-		if f.QP != e.cfg.QP {
-			continue
-		}
-		if e.cfg.Proto == config.ProtoUET && f.Proto != "uet" {
-			continue
-		}
-		if e.cfg.Proto == config.ProtoMRC && f.Proto != "mrc" {
-			continue
-		}
-
-		e.stats.MarkStart()
-		e.stats.PacketsRecv.Add(1)
-		if f.RTX {
-			e.stats.RTXFlagged.Add(1)
-		}
-		dup, _, _ := tracker.Observe(f.PSN)
-		if dup {
-			e.stats.Duplicates.Add(1)
-		} else {
-			e.stats.BytesUnique.Add(uint64(len(f.Payload)))
-		}
-		lastSrc = f.SrcIP
-		lastEntropy = f.Entropy
-		lastMAC = f.SrcMAC
-		pktsSinceSACK++
-		if pktsSinceSACK >= e.cfg.SackEvery {
-			if err := sendSACKFn(); err != nil {
-				return err
-			}
-		}
-	}
+	return e.runReceiver(ctx)
 }
 
 func isWouldBlock(err error) bool {

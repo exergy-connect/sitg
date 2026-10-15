@@ -1,8 +1,8 @@
 # Super Intelligence Traffic Generator (SITG)
 
-SITG is a Linux traffic generator for **Ultra Ethernet Transport (UET)** and **Multipath Reliable Connection (MRC)** flows. It injects live frames with `AF_PACKET`, runs a simplified reliable window between a send and recv process, and can optionally source-route packets with **SRv6 uSID** destinations.
+SITG is a Linux traffic generator for **Ultra Ethernet Transport (UET)**, **Multipath Reliable Connection (MRC)**, and **OCP Falcon** flows. It injects live frames with `AF_PACKET`, runs a simplified reliable window between a send and recv process, and can optionally source-route packets with **SRv6 uSID** destinations.
 
-Headers are a recognizable subset of UET and MRC for lab and fabric testing—not a full specification implementation.
+Headers are a recognizable subset of UET, MRC, and Falcon for lab and fabric testing—not a full specification implementation.
 
 ## Requirements
 
@@ -35,7 +35,36 @@ sudo ./sitg --role send --iface eth0 --proto uet --encap udp6 \
   --qp 1 --rate 10Gbps --duration 10s
 ```
 
-Match `--proto`, `--encap`, `--qp`, and (for native UET) `--ip-proto` on both sides.
+Match `--proto`, `--encap`, `--qp`, and (for native UET) `--ip-proto` on both sides,
+or run a receiver with `--proto all` to accept all supported wire formats.
+
+## Receive all protocols and variants
+
+```bash
+sudo ./sitg --role recv --iface eth0 --proto all --duration 0s --qp 1
+```
+
+One receiver accepts UET, MRC, and Falcon simultaneously, using every supported
+IPv4/IPv6 encapsulation: UDP for all three protocols and native IP for UET.
+Plain and SRv6-encapsulated traffic are both detected automatically, regardless
+of `--entropy`. Only address families available on the interface are enabled.
+Native UET uses the configured `--ip-proto` (default `253`).
+
+`--proto all` implies `--encap all` unless an explicit encapsulation is provided.
+Use `--proto all --encap udp6` to restrict the wire format, or
+`--proto uet --encap all` to receive all UET variants. Senders select one concrete
+protocol and encapsulation. `--duration 0s` keeps the receiver running until SIGINT.
+
+`--qp` still selects the UET/MRC QP and Falcon CM service. Reliability state is
+separate for each protocol, encapsulation, peer, local IP, QP and plain/SRv6
+variant; Falcon connections retain their negotiated CIDs and sequence windows.
+ACKs use the incoming protocol and encapsulation and return directly to the inner
+source IP. Progress and final statistics aggregate all accepted traffic.
+
+Falcon setup listens on the selected interface's IPv4 and IPv6 addresses at
+`--falcon-cm-port`, where UDP encapsulations are enabled. The receiver supports
+up to 4096 UET/MRC flows and 1024 active Falcon connections per run; new flows
+beyond those limits are rejected or ignored. UET/MRC flow state remains until exit.
 
 ## CLI reference
 
@@ -43,8 +72,8 @@ Match `--proto`, `--encap`, `--qp`, and (for native UET) `--ip-proto` on both si
 |------|---------|-------------|
 | `--role` | `send` | `send` or `recv` |
 | `--iface` | *(required)* | Network interface for AF_PACKET |
-| `--proto` | `uet` | `uet` or `mrc` |
-| `--encap` | `udp6` | Encapsulation (see below) |
+| `--proto` | `uet` | `uet`, `mrc`, `falcon`, or `all` (receiver only) |
+| `--encap` | `udp6` | Encapsulation; `all` for receivers (implicit with `--proto all`) |
 | `--ip-proto` | `253` | IPv4 protocol / IPv6 next-header for native UET |
 | `--dst` | | Destination IP (sender; required for most patterns) |
 | `--dst-mac` | | Destination MAC (optional if neighbor is known) |
@@ -63,20 +92,22 @@ Match `--proto`, `--encap`, `--qp`, and (for native UET) `--ip-proto` on both si
 | `--hops` | `3` | uSID hops per path (1–6) |
 | `--radix` | `32` | Fabric radix for path encoding |
 | `--usid-base` | `0x0100` | Base 16-bit uSID value |
-| `--qp` | `1` | Queue pair / PDC identifier |
+| `--qp` | `1` | Queue pair / PDC identifier; Falcon CM service and first local receive CID |
+| `--falcon-cm-port` | `4795` | TCP port for SITG Falcon connection setup |
+| `--connect-timeout` | `5s` | Falcon setup and final window-drain timeout |
 
 ### Encapsulation (`--encap`)
 
 | Value | Protocol | Wire shape |
 |-------|----------|------------|
-| `udp6` | UET or MRC | IPv6 + UDP (UET port **4793**, MRC port **4791**) |
-| `udp4` | UET or MRC | IPv4 + UDP |
+| `udp6` | UET, MRC, or Falcon | IPv6 + UDP (UET port **4793**, MRC port **4791**) |
+| `udp4` | UET, MRC, or Falcon | IPv4 + UDP |
 | `ip6` | UET only | Native IPv6 + 4-byte entropy header |
 | `ip4` | UET only | Native IPv4 + 4-byte entropy header (DF set) |
 
 UET over UDP uses UDP source port as entropy and sets the UDP checksum to `0`. Native UET places a 4-byte entropy header after the IP header; configure the IP protocol with `--ip-proto` (default `253` until IANA assigns one).
 
-MRC requires `udp6` or `udp4`.
+MRC and Falcon require `udp6` or `udp4`.
 
 ### Entropy and SRv6 (`--entropy`)
 
@@ -116,6 +147,52 @@ sudo ./sitg --role send --iface eth0 --proto mrc --encap udp6 \
   --dst 2001:db8::20 --dst-mac 02:00:00:00:00:20 \
   --pattern elephant --rate 200Gbps --window 512 --rto 2ms --qp 7 --duration 60s
 ```
+
+### OCP Falcon lab traffic
+
+```bash
+sudo ./sitg --role recv --iface eth0 --proto falcon --encap udp6 --qp 7 --duration 60s
+sudo ./sitg --role send --iface eth0 --proto falcon --encap udp6 \
+  --dst 2001:db8::20 --dst-mac 02:00:00:00:00:20 --qp 7 --duration 30s
+```
+
+Falcon uses the v1.1 Push Data base header and request length, and BACK/EACK
+acknowledgements from the [OCP Falcon specification](https://github.com/opencomputeproject/OCP-NET-Falcon).
+SITG carries these headers directly over cleartext UDP port **4794**, a local lab
+convention, not an assigned Falcon port or the specification's PSP/ESP envelope.
+Both peers must use SITG's lab framing; this does not interoperate with secured
+Falcon NICs. IPv4, IPv6, ECMP and SRv6 use the same options as MRC.
+
+Falcon connections are established automatically before traffic starts. SITG's
+versioned TCP control plane (`sitg-falcon-cm/1`) listens on `--falcon-cm-port`
+(default **4795**) at the interface's selected IP address (both address families with `--encap all`). This is a SITG control
+protocol, not a standardized Falcon setup packet. With SRv6, control traffic uses
+ordinary IP routing to the inner peer address; data retains SRv6 encapsulation.
+
+Use matching `--qp` values to select the receiver's CM service. Each endpoint
+allocates its own 24-bit receive CID, starting at `--qp` and increasing for each
+connection. Data carries the receiver's CID; acknowledgements carry the sender's
+CID. The IDs are logged at setup and need not be equal. Multiple senders and
+fan-out peers have independent sequence windows and acknowledgement state.
+CIDs are not reused during a process lifetime; drain old traffic before restarting
+a receiver with the same CID range.
+
+Setup negotiates encapsulation, maximum packet payload, and an in-flight window
+bounded by both endpoints and SITG's 64-packet selective-ACK implementation.
+PSN and receive-window bases initialize to zero per connection. Mismatched
+services/encapsulations are rejected. Data from unknown CIDs or other source IPs
+is ignored, and no data is sent until all peer setups complete. `--duration` starts
+after sender setup; the receiver's duration includes its listening time.
+`--connect-timeout` bounds each peer's setup and the sender's final window drain.
+The TCP connection stays open during the run; closing it tears down the connection
+state. A sender exits with an error if a peer disconnects during transfer.
+
+Message ID maps to the request sequence number. The payload is opaque lab data;
+RDMA ULP headers, message offsets, PSP/ESP, pull transactions, NACK/resync and
+congestion control are not implemented. Falcon has no RTX flag, so retransmissions
+retain the original PSN and do not increment RTX-flagged stats. EACK translates
+the selective window into Falcon's base-relative 128-bit data ACK/Rx bitmaps;
+request-window and congestion metadata remain zero.
 
 ### Native UET (no UDP)
 

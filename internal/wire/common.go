@@ -38,7 +38,7 @@ const (
 // Frame is a decoded transport packet.
 type Frame struct {
 	Type      PacketType
-	Proto     string // "uet" or "mrc"
+	Proto     string // "uet", "mrc", or "falcon"
 	Encap     string
 	SrcIP     netip.Addr
 	DstIP     netip.Addr
@@ -60,18 +60,18 @@ type Frame struct {
 
 // BuildOpts controls Ethernet/IP/UDP/SRv6 framing.
 type BuildOpts struct {
-	SrcMAC     net.HardwareAddr
-	DstMAC     net.HardwareAddr
-	SrcIP      netip.Addr
-	DstIP      netip.Addr
-	Encap      string // udp6|udp4|ip6|ip4
-	IPProto    uint8  // for native UET
-	Entropy    uint16
-	UseSRv6    bool
-	SRv6Dst    netip.Addr
-	SRv6SrcIP  netip.Addr // outer IPv6 source when UseSRv6 (required for IPv4 inner)
-	TOS        uint8
-	HopLimit   uint8
+	SrcMAC    net.HardwareAddr
+	DstMAC    net.HardwareAddr
+	SrcIP     netip.Addr
+	DstIP     netip.Addr
+	Encap     string // udp6|udp4|ip6|ip4
+	IPProto   uint8  // for native UET
+	Entropy   uint16
+	UseSRv6   bool
+	SRv6Dst   netip.Addr
+	SRv6SrcIP netip.Addr // outer IPv6 source when UseSRv6 (required for IPv4 inner)
+	TOS       uint8
+	HopLimit  uint8
 }
 
 func checksumFold(sum uint32) uint16 {

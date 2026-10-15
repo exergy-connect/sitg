@@ -62,3 +62,58 @@ func TestOutcastRequiresPeers(t *testing.T) {
 		t.Fatal("expected peers required")
 	}
 }
+
+func TestFalconConfig(t *testing.T) {
+	for _, encap := range []string{"udp4", "udp6", "ip4", "ip6"} {
+		for _, qp := range []string{"1", "16777215", "16777216"} {
+			_, err := Parse([]string{"--role", "recv", "--iface", "lo", "--proto", "falcon", "--encap", encap, "--qp", qp})
+			valid := (encap == "udp4" || encap == "udp6") && qp != "16777216"
+			if (err == nil) != valid {
+				t.Fatalf("encap=%s qp=%s err=%v", encap, qp, err)
+			}
+		}
+	}
+}
+
+func TestFalconCMOptions(t *testing.T) {
+	for _, args := range [][]string{{"--falcon-cm-port", "0"}, {"--falcon-cm-port", "65536"}, {"--connect-timeout", "0s"}, {"--connect-timeout", "-1s"}} {
+		_, err := Parse(append([]string{"--role", "recv", "--iface", "lo", "--proto", "falcon"}, args...))
+		if err == nil {
+			t.Fatalf("accepted %v", args)
+		}
+	}
+	c, err := Parse([]string{"--role", "recv", "--iface", "lo", "--proto", "falcon", "--falcon-cm-port", "12345", "--connect-timeout", "2s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.FalconCMPort != 12345 || c.ConnectTimeout.String() != "2s" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestReceiveAll(t *testing.T) {
+	for _, proto := range []string{"all", "uet", "mrc", "falcon"} {
+		c, err := Parse([]string{"--role", "recv", "--iface", "lo", "--proto", proto, "--encap", "all"})
+		if err != nil || c.Encap != EncapAll {
+			t.Fatalf("%s: %+v %v", proto, c, err)
+		}
+	}
+	c, err := Parse([]string{"--role", "recv", "--iface", "lo", "--proto", "all"})
+	if err != nil || c.Encap != EncapAll {
+		t.Fatalf("all must imply all encapsulations: %+v %v", c, err)
+	}
+	c, err = Parse([]string{"--role", "recv", "--iface", "lo", "--proto", "all", "--encap", "udp6"})
+	if err != nil || c.Encap != EncapUDP6 {
+		t.Fatalf("explicit filter lost: %+v %v", c, err)
+	}
+	for _, args := range [][]string{{"--proto", "all"}, {"--encap", "all"}} {
+		if _, err := Parse(append([]string{"--iface", "lo", "--dst", "::1"}, args...)); err == nil {
+			t.Fatalf("sender accepted %v", args)
+		}
+	}
+	for _, args := range [][]string{{"--qp", "16777216"}, {"--falcon-cm-port", "0"}, {"--connect-timeout", "0s"}} {
+		if _, err := Parse(append([]string{"--role", "recv", "--iface", "lo", "--proto", "all"}, args...)); err == nil {
+			t.Fatalf("all bypassed Falcon validation: %v", args)
+		}
+	}
+}

@@ -32,7 +32,6 @@ func parseIPv6MaybeSRv6(payload []byte, ipProto uint8, dstMAC, srcMAC net.Hardwa
 		return nil, ErrShortPacket
 	}
 	next := payload[6]
-	srcIP, _ := netip.AddrFromSlice(payload[8:24])
 	dstIP, _ := netip.AddrFromSlice(payload[24:40])
 	inner := payload[IPv6HeaderLen:]
 
@@ -42,14 +41,12 @@ func parseIPv6MaybeSRv6(payload []byte, ipProto uint8, dstMAC, srcMAC net.Hardwa
 		if err != nil {
 			return nil, err
 		}
-		f.SrcIP = srcIP
 		return f, nil
 	case IPProtoIPv4:
 		f, err := parseIP(inner, false, ipProto, dstMAC, srcMAC, true, dstIP)
 		if err != nil {
 			return nil, err
 		}
-		f.SrcIP = srcIP
 		return f, nil
 	default:
 		return parseIP(payload, true, ipProto, dstMAC, srcMAC, false, netip.Addr{})
@@ -152,6 +149,8 @@ func decodeTransport(dstPort uint16, trans []byte) (*Frame, error) {
 	switch dstPort {
 	case UETUDPPort:
 		return DecodeUETTransport(trans)
+	case FalconUDPPort:
+		return DecodeFalconTransport(trans)
 	case MRCUDPPort:
 		return DecodeMRCTransport(trans)
 	default:
