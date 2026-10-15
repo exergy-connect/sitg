@@ -51,7 +51,7 @@ func (e *Engine) receiverACK(c *falconConnection) error {
 	case "uet":
 		raw, err = wire.BuildUETFrame(opts, wire.EncodeUETSACK(c.remoteCID, cum, bm))
 	case "mrc":
-		raw, err = wire.BuildMRCFrame(opts, wire.EncodeMRCSACK(c.remoteCID, cum, bm))
+		raw, err = wire.BuildMRCFrame(opts, wire.EncodeMRCSACK(c.remoteCID, cum, bm, uint32(c.last.Entropy)))
 	case "falcon":
 		raw, err = wire.BuildFalconFrame(opts, wire.EncodeFalconSACK(c.remoteCID, cum, bm))
 	default:

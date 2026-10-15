@@ -72,6 +72,11 @@ func New(cfg *config.Config, sock *link.Socket) (*Engine, error) {
 			return nil, err
 		}
 	}
+	if (cfg.Proto == config.ProtoUET || cfg.Proto == config.ProtoAll) && (cfg.Encap == config.EncapIP4 || cfg.Encap == config.EncapIP6 || cfg.Encap == config.EncapAll) {
+		if err := sock.ReserveNative(e.receiverIPs(), cfg.IPProto); err != nil {
+			return nil, err
+		}
+	}
 	return e, nil
 }
 

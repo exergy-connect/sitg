@@ -2,7 +2,7 @@
 
 SITG is a Linux traffic generator for **Ultra Ethernet Transport (UET)**, **Multipath Reliable Connection (MRC)**, and **OCP Falcon** flows. It injects live frames with `AF_PACKET`, runs a simplified reliable window between a send and recv process, and can optionally source-route packets with **SRv6 uSID** destinations.
 
-UET traffic uses UET 1.0.1 RUD Request headers, Standard SES Write requests, ACK_CC selective acknowledgments, and a CRC32C trailer covering the inner IP addresses through the transport payload. MRC and Falcon support remains a subset for lab and fabric testing.
+UET traffic uses UET 1.0.1 RUD Request headers, Standard SES Write requests, ACK_CC selective acknowledgments, and a CRC32C trailer covering the inner IP addresses through the transport payload. MRC traffic uses OCP MRC 1.0 Write and Reliability SACK wire formats; Falcon support remains a subset for lab and fabric testing.
 
 ## Requirements
 
@@ -110,9 +110,16 @@ UET uses preconfigured symmetric 16-bit PDC IDs (`--qp`, at most 65535), rather 
 
 SITG binds the selected protocol UDP ports on its local interface addresses on both senders and receivers, attaching a drop-all UDP socket filter while AF_PACKET processes the frames. The filter discards kernel copies before queueing, so no drain goroutines or userspace receive buffers are needed. This prevents kernel-generated ICMP port-unreachable replies. Port conflicts fail at startup, and the bindings are released on exit.
 
+Native UET also registers filtered raw-IP sockets for the configured `--ip-proto` on both endpoints (including the All protocols receiver). This prevents IPv4 protocol-unreachable and IPv6 unrecognized-next-header ICMP errors without receive queues or drain loops.
+
 UET over UDP uses UDP source port as entropy and sets the UDP checksum to `0`. Native UET places a 4-byte entropy header after the IP header; configure the IP protocol with `--ip-proto` (default `253` until IANA assigns one).
 
 MRC and Falcon require `udp6` or `udp4`.
+
+MRC emits standard Write First/Middle/Last/Only opcodes (`0xc6`, `0xc7`, `0xc8`, `0xca`), METH and per-packet RETH, BTH ACK/retransmission flags, four-byte alignment padding, and a RoCE invariant CRC trailer. Reliability SACK (`0xdc`) carries SETH and idle NSCC state, an inclusive 24-bit CACK, a signed SACK base offset, the selective bitmap, and reflected request entropy. UDP checksums include the final trailer. CRC validation is not performed.
+
+The lab profile uses preconfigured symmetric 24-bit QPs, a synthetic memory region (key 1, virtual address equal to the message byte offset), and 16-bit wrapping message IDs. It does not negotiate real RDMA resources or implement full congestion control. Runs must end before the 24-bit packet sequence space wraps. Both endpoints need the updated binary.
+
 
 ### Entropy and SRv6 (`--entropy`)
 

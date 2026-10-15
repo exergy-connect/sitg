@@ -24,9 +24,10 @@ type Endpoint struct {
 
 // Socket is an AF_PACKET raw socket bound to an interface.
 type Socket struct {
-	fd  int
-	ep  *Endpoint
-	udp []*net.UDPConn
+	fd     int
+	ep     *Endpoint
+	udp    []*net.UDPConn
+	native []net.PacketConn
 }
 
 // ResolveEndpoint looks up the interface and its addresses.
@@ -138,16 +139,7 @@ func (s *Socket) ReserveUDP(addresses []netip.Addr, ports []int) error {
 // datagram before queueing. The endpoint prevents ICMP port-unreachable;
 // AF_PACKET independently receives the original frame. No drain loop is needed.
 func listenUDPDiscard(network, address string) (*net.UDPConn, error) {
-	lc := net.ListenConfig{Control: func(_, _ string, raw syscall.RawConn) error {
-		var filterErr error
-		if err := raw.Control(func(fd uintptr) {
-			filter := []unix.SockFilter{{Code: unix.BPF_RET | unix.BPF_K, K: 0}}
-			filterErr = unix.SetsockoptSockFprog(int(fd), unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{Len: 1, Filter: &filter[0]})
-		}); err != nil {
-			return err
-		}
-		return filterErr
-	}}
+	lc := net.ListenConfig{Control: discardControl}
 	conn, err := lc.ListenPacket(context.Background(), network, address)
 	if err != nil {
 		return nil, err
@@ -155,7 +147,45 @@ func listenUDPDiscard(network, address string) (*net.UDPConn, error) {
 	return conn.(*net.UDPConn), nil
 }
 
+// ReserveNative registers native UET with the host IP stack, suppressing
+// protocol-unreachable errors. Drop filters keep all reception in AF_PACKET.
+func (s *Socket) ReserveNative(addresses []netip.Addr, protocol uint8) error {
+	var opened []net.PacketConn
+	lc := net.ListenConfig{Control: discardControl}
+	for _, ip := range addresses {
+		family := "ip6"
+		if ip.Is4() {
+			family = "ip4"
+		}
+		conn, err := lc.ListenPacket(context.Background(), fmt.Sprintf("%s:%d", family, protocol), ip.String())
+		if err != nil {
+			for _, c := range opened {
+				_ = c.Close()
+			}
+			return fmt.Errorf("reserve native IP protocol %d on %s: %w", protocol, ip, err)
+		}
+		opened = append(opened, conn)
+	}
+	s.native = append(s.native, opened...)
+	return nil
+}
+
+func discardControl(_, _ string, raw syscall.RawConn) error {
+	var filterErr error
+	if err := raw.Control(func(fd uintptr) {
+		filter := []unix.SockFilter{{Code: unix.BPF_RET | unix.BPF_K, K: 0}}
+		filterErr = unix.SetsockoptSockFprog(int(fd), unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{Len: 1, Filter: &filter[0]})
+	}); err != nil {
+		return err
+	}
+	return filterErr
+}
+
 func (s *Socket) Close() error {
+	for _, c := range s.native {
+		_ = c.Close()
+	}
+	s.native = nil
 	for _, c := range s.udp {
 		_ = c.Close()
 	}
