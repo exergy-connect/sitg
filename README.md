@@ -73,9 +73,9 @@ ACKs use the incoming protocol and encapsulation and return directly to the inne
 source IP. Progress and final statistics aggregate all accepted traffic.
 
 Falcon setup listens on the selected interface's IPv4 and IPv6 addresses at
-`--falcon-cm-port`, where UDP encapsulations are enabled. The receiver supports
+`--falcon-cm-port`; UET/MRC receivers also listen there for flow resets. The receiver supports
 up to 4096 UET/MRC flows and 1024 active Falcon connections per run; new flows
-beyond those limits are rejected or ignored. UET/MRC flow state remains until exit.
+beyond those limits are rejected or ignored. UET/MRC flow state remains until reset or exit.
 
 ## CLI reference
 
@@ -105,7 +105,8 @@ beyond those limits are rejected or ignored. UET/MRC flow state remains until ex
 | `--radix` | `32` | Fabric radix for path encoding |
 | `--usid-base` | `0x0100` | Base 16-bit uSID value |
 | `--qp` | `1` | Queue pair / PDC identifier; Falcon CM service and first local receive CID |
-| `--falcon-cm-port` | `4795` | TCP port for SITG Falcon connection setup |
+| `--falcon-cm-port` | `4795` | TCP port for SITG connection setup and flow reset |
+| `--reset-receiver` | `false` | Sender: reset matching UET/MRC receiver flows before sending |
 | `--connect-timeout` | `5s` | Falcon setup and final window-drain timeout |
 
 ### Encapsulation (`--encap`)
@@ -393,3 +394,17 @@ sitg --scenario artificial-tango --iface eth1 --encap udp4 --dst 192.0.2.2
 
 See [the scenario notes](scenarios/README.md) for receiver setup and approximate
 song timing. A custom file can still be passed to `--scenario`.
+
+### Reset a running receiver before a new test
+
+Pass `--reset-receiver` on UET or MRC senders to clear the receiver's old
+reliability state before starting at PSN zero. This also resets both protocols
+for mixed senders; Falcon already establishes a fresh connection.
+
+The sender waits for an acknowledged `sitg-flow-reset/1` request on the TCP
+control port (`--falcon-cm-port`, default 4795). Reset is scoped to the sender
+and receiver addresses, encapsulation, protocol, and QP; other senders retain
+their state. Receivers listen on this port for all supported encapsulations.
+Both endpoints must run a build supporting reset. A rejected or timed-out reset
+fails the test before data transmission. Stop a previous sender using the same
+flow before resetting it.

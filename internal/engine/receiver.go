@@ -91,28 +91,25 @@ func (e *Engine) runReceiver(ctx context.Context) error {
 			_ = l.Close()
 		}
 	}()
-	if e.cfg.Proto == config.ProtoFalcon || e.cfg.Proto == config.ProtoAll {
+	{
 		// Separate v4/v6 listeners prevent a wildcard socket from claiming addresses
 		// outside the selected interface or masking an address-family bind failure.
 		for _, ip := range ips {
-			encap, network := "udp6", "tcp6"
+			network := "tcp6"
 			if ip.Is4() {
-				encap, network = "udp4", "tcp4"
+				network = "tcp4"
 			}
-			if !e.acceptsEncap(encap) {
-				continue
-			} // native-only filters do not need Falcon CM
 			lc := net.ListenConfig{}
 			listener, err := lc.Listen(cmCtx, network, net.JoinHostPort(ip.String(), strconv.Itoa(e.cfg.FalconCMPort)))
 			if err != nil {
-				return fmt.Errorf("Falcon CM listen on %s: %w", ip, err)
+				return fmt.Errorf("SITG control listen on %s: %w", ip, err)
 			}
 			listeners = append(listeners, listener)
 		}
 		// Start only after all binds succeed, so partial startup leaves no CM peers.
 		for _, l := range listeners {
 			go serveFalconCM(cmCtx, l, e.cfg.ConnectTimeout, events)
-			fmt.Fprintf(os.Stderr, "Falcon CM listening on %s\n", l.Addr())
+			fmt.Fprintf(os.Stderr, "SITG control listening on %s\n", l.Addr())
 		}
 	}
 	flows := make(map[receiverFlowKey]*falconConnection)
@@ -181,12 +178,36 @@ func (e *Engine) runReceiver(ctx context.Context) error {
 				}
 				continue
 			}
+			if ev.hello.Protocol == "sitg-flow-reset/1" {
+				response := ev.hello
+				h := ev.hello
+				protoOK := h.ResetProto == "uet" || h.ResetProto == "mrc"
+				encapOK := h.Encap == "udp4" || h.Encap == "udp6" || h.Encap == "ip4" || h.Encap == "ip6"
+				familyOK := (h.Encap == "udp4" || h.Encap == "ip4") == ev.local.Is4()
+				if !protoOK || !encapOK || !local[ev.local] || !familyOK || !e.acceptsEncap(h.Encap) ||
+					(e.cfg.Proto != config.ProtoAll && string(e.cfg.Proto) != h.ResetProto) ||
+					(!e.cfg.AcceptAnyQP && h.Service != e.cfg.QP) {
+					response.Error = "reset does not match receiver protocol, encapsulation or QP"
+				} else {
+					for key := range flows {
+						if key.proto == h.ResetProto && key.encap == h.Encap && key.src == ev.peer && key.dst == ev.local && key.qp == h.Service {
+							delete(flows, key)
+						}
+					}
+					updateGaps()
+				}
+				ev.reply <- response
+				continue
+			}
 			response := e.falconHello(0)
 			response.Encap = ev.hello.Encap
 			if e.cfg.AcceptAnyQP {
 				response.Service = ev.hello.Service
 			}
 			err := ev.hello.validate()
+			if e.cfg.Proto != config.ProtoFalcon && e.cfg.Proto != config.ProtoAll {
+				err = fmt.Errorf("receiver does not accept Falcon")
+			}
 			if err == nil {
 				switch {
 				case !e.cfg.AcceptAnyQP && ev.hello.Service != e.cfg.QP:

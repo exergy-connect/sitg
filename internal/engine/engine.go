@@ -90,6 +90,11 @@ func (e *Engine) Run() error {
 // RunContext runs a session until completion or cancellation.
 func (e *Engine) RunContext(ctx context.Context) error {
 	if e.cfg.Role == config.RoleSend {
+		if e.cfg.ResetReceiver {
+			if err := e.resetReceivers(ctx); err != nil {
+				return err
+			}
+		}
 		return e.runSend(ctx)
 	}
 	return e.runRecv(ctx)

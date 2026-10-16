@@ -17,13 +17,14 @@ const falconCMVersion = "sitg-falcon-cm/1"
 const maxFalconConnections = 1024
 
 type falconHello struct {
-	Protocol string
-	CID      uint32 // receive CID allocated by the sender of this message
-	Service  uint32 // receiver's --qp, used to select the listening service
-	Encap    string
-	Payload  int
-	Window   int
-	Error    string `json:",omitempty"`
+	Protocol   string
+	ResetProto string `json:",omitempty"`
+	CID        uint32 // receive CID allocated by the sender of this message
+	Service    uint32 // receiver's --qp, used to select the listening service
+	Encap      string
+	Payload    int
+	Window     int
+	Error      string `json:",omitempty"`
 }
 
 func (h falconHello) validate() error {
