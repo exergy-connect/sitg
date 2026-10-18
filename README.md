@@ -104,7 +104,9 @@ beyond those limits are rejected or ignored. UET/MRC flow state remains until re
 | `--hops` | `3` | uSID hops per path (1–6) |
 | `--radix` | `32` | Fabric radix for path encoding |
 | `--usid-base` | `0x0100` | Base 16-bit uSID value |
-| `--srv6-paths` | unset | Comma-separated explicit outer IPv6 destinations; requires `--entropy srv6`; receiver applies them to ACKs |
+| `--srv6-paths` | unset | Comma-separated explicit outer IPv6 destinations; requires `--entropy srv6`; MRC receivers use confirmed reverse EVs for ACKs |
+| `--ev-planes` | all plane 0 | Comma-separated plane IDs, one per SRv6 path |
+| `--reverse-rtt` | `1ms` | Initial MRC reverse-probe RTT estimate, refined from successful replies |
 | `--qp` | `1` | Queue pair / PDC identifier; Falcon CM service and first local receive CID |
 | `--falcon-cm-port` | `4795` | TCP port for SITG connection setup and flow reset |
 | `--reset-receiver` | `false` | Sender: reset matching UET/MRC receiver flows before sending |
@@ -139,7 +141,7 @@ The lab profile uses preconfigured symmetric 24-bit QPs, a synthetic memory regi
 - **`ecmp`** — Path entropy in the encapsulation field (UDP source port, or native entropy header). Also set as the IPv6 flow label when applicable.
 - **`srv6`** — Outer IPv6 header whose destination is a uN-style uSID address: 32-bit locator + up to six 16-bit uSIDs. The inner packet keeps `--encap`. Path `i` uses `hop_k = usid-base + (i / radix^k) % radix`. Outer next-header is `41` (IPv6) or `4` (IPv4). Requires an IPv6 address on the interface for the outer source.
 
-Use `--srv6-paths` to supply actual fabric paths instead of the algorithmic generator. Senders cycle through the supplied destinations; a single destination pins the outer path. `--dst` remains the inner destination. Receivers can supply their own reverse paths, which are cycled independently for ACKs while preserving the inner flow addresses and encapsulation. The interface must have IPv6 connectivity to every supplied outer destination.
+Use `--srv6-paths` to supply actual fabric paths instead of the algorithmic generator. Senders cycle through the supplied destinations; a single destination pins the outer path. `--dst` remains the inner destination. Receivers supply their own reverse candidate paths; MRC ACKs use a small confirmed reverse EV set while preserving the inner flow addresses and encapsulation. The interface must have IPv6 connectivity to every supplied outer destination.
 
 For the two-spine lab, configure the receiver's reverse paths and then send at 1 packet per second:
 
@@ -153,6 +155,18 @@ sudo ./sitg --role send --iface eth1 --proto mrc --encap udp6 \
   --dst 5f00:0:302:: --entropy srv6 \
   --srv6-paths 5f00:0:100:302::,5f00:0:101:302:: --rate 1pps --duration 60s
 ```
+
+### MRC reverse EV maintenance
+
+For SRv6 path profiles, reverse EV state is kept per local/remote address pair, inner encapsulation and QP. Each plane has one confirmed reverse EV. All paths belong to plane 0 unless `--ev-planes` supplies a plane ID for each path; for example, `--ev-planes 0,0,1,1` describes four candidates across two planes. Plane IDs are configured explicitly, not inferred from uSID values.
+
+An inbound-active QP with no recent outbound data probes a randomly selected candidate within the next plane, at most once per estimated RTT. Probes use OCP MRC Endpoint Request/Response opcodes `0xd8`/`0xd9`, reserved QP `0x2` and a private 16-bit identifier. Replies must match an outstanding identifier, the exact peer/local addresses and encapsulation, and arrive before the timeout. Sending a probe does not confirm its EV. The matching reply updates that plane's reverse EV and the RTT estimate. Probe replies may use an outbound candidate to bootstrap reachability; ordinary data SACKs wait for a confirmed reverse EV.
+
+During bidirectional MRC traffic, clean data SACKs refresh reverse EVs from the actual acknowledged outgoing packets, so separate probes stop once the planes have confirmed paths. Probes still bootstrap an initially empty set, avoiding mutual ACK starvation. Marked SACKs and matching NACKs invalidate the affected reverse proof. Probe loss never promotes a candidate; pending records expire, stale confirmed EVs stop carrying controls, and active inbound QPs continue probing. Idle QPs stop probing. Probe counters are printed in the final report.
+
+The ACK's routing EV identifies its selected reverse uSID path. Its SETH reflected EV and triggering PSN identify the incoming forward packet independently, including out-of-order packets. MRC's IPv6 EV encoding uses the UDP source port for the low 16 bits and the flow label for the high 16 bits; SITG's configured path indices currently fit in the low half.
+
+This adds reverse EV selection to SITG's existing SACK reliability implementation. Separate RoCE cumulative-ACK and MRC NACK generation, the full forward EV health state machine, and NSCC remain outside the implemented transport profile.
 
 ### Traffic patterns (`--pattern`)
 

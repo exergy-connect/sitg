@@ -153,3 +153,16 @@ func TestExplicitSRv6Paths(t *testing.T) {
 		t.Fatal("accepted explicit SRv6 paths without SRv6 entropy")
 	}
 }
+
+func TestReverseEVPlaneConfiguration(t *testing.T) {
+	base := []string{"--role", "recv", "--iface", "lo", "--proto", "mrc", "--entropy", "srv6", "--srv6-paths", "5f00:0:100:301::,5f00:0:101:301::"}
+	cfg, err := Parse(append(base, "--ev-planes", "3,7", "--reverse-rtt", "2ms"))
+	if err != nil || len(cfg.EVPlanes) != 2 || cfg.EVPlanes[1] != 7 {
+		t.Fatalf("plane mapping rejected: %+v %v", cfg, err)
+	}
+	for _, args := range [][]string{{"--ev-planes", "0"}, {"--ev-planes", "0,-1"}, {"--ev-planes", "0,x"}, {"--reverse-rtt", "0s"}} {
+		if _, err := Parse(append(base, args...)); err == nil {
+			t.Fatalf("accepted invalid reverse EV config: %v", args)
+		}
+	}
+}

@@ -105,3 +105,70 @@ func TestMRCStandardWireFields(t *testing.T) {
 		}
 	}
 }
+
+func TestMRCEndpointProbeWireFormat(t *testing.T) {
+	for _, reply := range []bool{false, true} {
+		b := EncodeMRCEVProbe(0x1234, reply)
+		wantOpcode, wantOp, wantLen := byte(0xd8), byte(1), 32
+		wantType := TypeEVProbe
+		if reply {
+			wantOpcode, wantOp, wantLen = 0xd9, 4, 52
+			wantType = TypeEVProbeReply
+		}
+		if len(b) != wantLen || b[0] != wantOpcode || b[7] != 2 || b[10] != 0x12 || b[11] != 0x34 || b[13] != wantOp {
+			t.Fatalf("bad OCP endpoint packet: %x", b)
+		}
+		f, err := DecodeMRCTransport(b)
+		if err != nil || f.Type != wantType || f.ProbeID != 0x1234 || f.QP != 2 {
+			t.Fatalf("bad probe decode: %+v %v", f, err)
+		}
+		for n := 0; n < len(b); n++ {
+			if _, err := DecodeMRCTransport(b[:n]); err == nil {
+				t.Fatalf("accepted truncated endpoint packet (%d)", n)
+			}
+		}
+		b[7] = 1
+		if _, err := DecodeMRCTransport(b); err == nil {
+			t.Fatal("accepted endpoint operation outside reserved QP 2")
+		}
+	}
+}
+func TestMRCSACKPreservesTriggerEVAndPSN(t *testing.T) {
+	b := EncodeMRCSACKForPacket(1, 3, 2, 0x12345678, 5)
+	f, err := DecodeMRCTransport(b)
+	if err != nil || f.ReflectedEV != 0x12345678 || f.AckPSN != 5 || f.CumAck != 3 {
+		t.Fatalf("incorrect SACK feedback: %+v %v", f, err)
+	}
+	b = EncodeMRCSACKForPacket(1, 10, 0, 10000, 7)
+	f, err = DecodeMRCTransport(b)
+	if err != nil || f.AckPSN != 7 {
+		t.Fatalf("signed trigger offset: %+v %v", f, err)
+	}
+}
+func TestMRCHeaderEVUsesSplitEncoding(t *testing.T) {
+	opts := BuildOpts{SrcIP: netip.MustParseAddr("2001:db8::1"), DstIP: netip.MustParseAddr("2001:db8::2"), Encap: "udp6", Entropy: 10001}
+	raw, err := BuildMRCFrame(opts, EncodeMRCSACK(1, 1, 0, 123))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := ParseEthernetFrame(raw, 253)
+	if err != nil || f.MRCEV != 10001 || f.ReflectedEV != 123 {
+		t.Fatalf("header EV duplicated across port and flow label: %+v %v", f, err)
+	}
+}
+
+func TestMRCNACKFeedback(t *testing.T) {
+	b := make([]byte, 36)
+	b[0] = 0xdd
+	b[7] = 1
+	b[18] = 0x27
+	b[19] = 0x10
+	b[27] = 9
+	f, err := DecodeMRCTransport(b)
+	if err != nil || f.Type != TypeNACK || f.ReflectedEV != 10000 || f.PSN != 9 || f.QP != 1 {
+		t.Fatalf("incorrect NACK feedback %+v %v", f, err)
+	}
+	if _, err := DecodeMRCTransport(b[:35]); err == nil {
+		t.Fatal("accepted truncated NACK")
+	}
+}

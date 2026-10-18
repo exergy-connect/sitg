@@ -24,14 +24,18 @@ type packetSocket interface {
 
 // Engine runs a send or recv session.
 type Engine struct {
-	cfg     *config.Config
-	sock    packetSocket
-	ep      *link.Endpoint
-	stats   *Stats
-	paths   []netip.Addr
-	ackPath int
-	dstMAC  map[netip.Addr]net.HardwareAddr
-	sel     *pattern.Selector
+	cfg        *config.Config
+	sock       packetSocket
+	ep         *link.Endpoint
+	stats      *Stats
+	paths      []netip.Addr
+	ackPath    int
+	mrcReverse map[mrcReverseKey]*mrcReversePeer
+	mrcInbound map[receiverFlowKey]*falconConnection
+	mrcProbeID uint16
+	mrcProbes  map[mrcProbeKey]mrcProbe
+	dstMAC     map[netip.Addr]net.HardwareAddr
+	sel        *pattern.Selector
 }
 
 func New(cfg *config.Config, sock *link.Socket) (*Engine, error) {
@@ -252,6 +256,9 @@ func (e *Engine) runSend(ctx context.Context) error {
 	}
 
 	for {
+		if err := e.serviceMRC(time.Now()); err != nil {
+			return err
+		}
 		retransmitDue := false
 		select {
 		case <-ctx.Done():
@@ -276,8 +283,20 @@ func (e *Engine) runSend(ctx context.Context) error {
 				return err
 			}
 			f, err := wire.ParseEthernetFrame(recvBuf[:n], e.cfg.IPProto)
-			if err != nil || f.Type != wire.TypeSACK || f.QP != e.cfg.QP || f.Proto != string(e.cfg.Proto) {
+			if err == nil {
+				handled, controlErr := e.handleMRC(f, time.Now())
+				if controlErr != nil {
+					return controlErr
+				}
+				if handled {
+					continue
+				}
+			}
+			if err != nil || f.Type != wire.TypeSACK || f.QP != e.cfg.QP || f.Proto != string(e.cfg.Proto) || !e.localMRC(f) || f.Encap != string(e.cfg.Encap) {
 				continue
+			}
+			if f.Proto == "mrc" {
+				e.noteMRCSACK(f, time.Now())
 			}
 			e.stats.MarkStart()
 			e.stats.SACKsRecv.Add(1)
@@ -367,6 +386,9 @@ func (e *Engine) runSend(ctx context.Context) error {
 			if err := e.sock.Send(frame); err != nil {
 				return err
 			}
+			if e.cfg.Proto == config.ProtoMRC {
+				e.noteMRCData(opts, e.cfg.QP, psn, time.Now())
+			}
 			win.Track(&Inflight{
 				PSN:       psn,
 				Payload:   append([]byte(nil), payload...),
@@ -420,6 +442,9 @@ func (e *Engine) retransmit(pkt *Inflight, pathIdx *int, entropyBase uint16, win
 		return err
 	}
 	*tokens -= e.packetCost(len(frame))
+	if e.cfg.Proto == config.ProtoMRC {
+		e.noteMRCData(opts, e.cfg.QP, pkt.PSN, time.Now())
+	}
 	win.MarkRetransmit(pkt.PSN, time.Now())
 	e.stats.PacketsSent.Add(1)
 	e.stats.Retransmits.Add(1)

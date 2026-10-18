@@ -81,6 +81,8 @@ type Config struct {
 	Radix          int
 	USIDBase       uint16
 	SRv6Paths      []netip.Addr
+	EVPlanes       []int
+	ReverseRTT     time.Duration
 	AcceptAnyQP    bool
 	ResetReceiver  bool
 	QP             uint32
@@ -116,6 +118,8 @@ func Parse(args []string) (*Config, error) {
 	paths := fs.Int("paths", 64, "number of SRv6 paths / entropy values")
 	hops := fs.Int("hops", 3, "uSID hops per path (max 6)")
 	radix := fs.Int("radix", 32, "fabric radix for path encoding")
+	evPlanes := fs.String("ev-planes", "", "comma-separated plane IDs for SRv6 paths (default: all in plane 0)")
+	reverseRTT := fs.Duration("reverse-rtt", time.Millisecond, "initial RTT for MRC reverse-path EV probing; refined from replies")
 	srv6Paths := fs.String("srv6-paths", "", "comma-separated explicit compressed uSID IPv6 destinations")
 	usidBase := fs.String("usid-base", "0x0100", "base 16-bit uSID value")
 	qp := fs.Uint("qp", 1, "queue pair / PDC identifier")
@@ -148,6 +152,7 @@ func Parse(args []string) (*Config, error) {
 		}
 	}
 	cfg := &Config{
+		ReverseRTT:     *reverseRTT,
 		Role:           Role(*role),
 		Iface:          *iface,
 		Proto:          Proto(*proto),
@@ -214,6 +219,27 @@ func Parse(args []string) (*Config, error) {
 		cfg.Paths = len(cfg.SRv6Paths)
 	}
 
+	if cfg.ReverseRTT <= 0 {
+		return nil, fmt.Errorf("reverse-rtt must be positive")
+	}
+	if *evPlanes != "" {
+		if cfg.Entropy != EntropySRv6 {
+			return nil, fmt.Errorf("ev-planes requires srv6 entropy")
+		}
+		for _, text := range strings.Split(*evPlanes, ",") {
+			plane, err := strconv.Atoi(text)
+			if err != nil || plane < 0 || plane > 65535 {
+				return nil, fmt.Errorf("ev-planes: invalid plane %q", text)
+			}
+			cfg.EVPlanes = append(cfg.EVPlanes, plane)
+		}
+		if len(cfg.EVPlanes) != cfg.Paths {
+			return nil, fmt.Errorf("ev-planes must have one entry per path")
+		}
+	}
+	if cfg.Entropy == EntropySRv6 && cfg.Paths > 55536 {
+		return nil, fmt.Errorf("srv6 paths exceed the unique 16-bit EV index range")
+	}
 	if *dst != "" {
 		cfg.Dst, err = netip.ParseAddr(*dst)
 		if err != nil {

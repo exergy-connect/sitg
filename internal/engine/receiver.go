@@ -46,8 +46,17 @@ func (e *Engine) receiverACK(c *falconConnection) error {
 	cum, bm, _ := c.tracker.Snapshot()
 	opts := wire.BuildOpts{SrcMAC: e.ep.SrcMAC, DstMAC: c.last.SrcMAC, SrcIP: c.localIP, DstIP: c.peer, Encap: c.encap, IPProto: e.cfg.IPProto, Entropy: c.last.Entropy}
 	if len(e.paths) > 0 {
+		path, routingEV := e.ackPath, c.last.Entropy
+		if c.last.Proto == "mrc" && e.mrcReverseEnabled() {
+			peer := e.reversePeer(mrcReverseKey{c.localIP, c.peer, c.encap, c.remoteCID})
+			selected, ok := e.confirmedPath(peer, time.Now())
+			if !ok {
+				return nil
+			}
+			path, routingEV = selected, uint16(10000+selected)
+		}
 		var err error
-		opts, err = e.buildOpts(c.peer, c.last.Entropy, e.ackPath)
+		opts, err = e.buildOpts(c.peer, routingEV, path)
 		if err != nil {
 			return err
 		}
@@ -63,7 +72,7 @@ func (e *Engine) receiverACK(c *falconConnection) error {
 	case "uet":
 		raw, err = wire.BuildUETFrame(opts, wire.EncodeUETSACK(c.remoteCID, cum, bm))
 	case "mrc":
-		raw, err = wire.BuildMRCFrame(opts, wire.EncodeMRCSACK(c.remoteCID, cum, bm, uint32(c.last.Entropy)))
+		raw, err = wire.BuildMRCFrame(opts, wire.EncodeMRCSACKForPacket(c.remoteCID, cum, bm, c.last.MRCEV, c.last.PSN))
 	case "falcon":
 		raw, err = wire.BuildFalconFrame(opts, wire.EncodeFalconSACK(c.remoteCID, cum, bm))
 	default:
@@ -139,6 +148,10 @@ func (e *Engine) runReceiver(ctx context.Context) error {
 			_, _, g := c.tracker.Snapshot()
 			gaps += uint64(g)
 		}
+		for _, c := range e.mrcInbound {
+			_, _, g := c.tracker.Snapshot()
+			gaps += uint64(g)
+		}
 		for _, c := range conns {
 			_, _, g := c.tracker.Snapshot()
 			gaps += uint64(g)
@@ -146,6 +159,9 @@ func (e *Engine) runReceiver(ctx context.Context) error {
 		e.stats.GapsOpen.Store(gaps)
 	}
 	flush := func() error {
+		if err := e.serviceMRC(time.Now()); err != nil {
+			return err
+		}
 		for _, c := range flows {
 			if c.pending > 0 {
 				if err := e.receiverACK(c); err != nil {
@@ -205,6 +221,20 @@ func (e *Engine) runReceiver(ctx context.Context) error {
 						if key.proto == h.ResetProto && key.encap == h.Encap && key.src == ev.peer && key.dst == ev.local && key.qp == h.Service {
 							delete(flows, key)
 						}
+					}
+					for key := range e.mrcInbound {
+						if key.proto == h.ResetProto && key.encap == h.Encap && key.src == ev.peer && key.dst == ev.local && key.qp == h.Service {
+							delete(e.mrcInbound, key)
+						}
+					}
+					reverseKey := mrcReverseKey{ev.local, ev.peer, h.Encap, h.Service}
+					if owner := e.mrcReverse[reverseKey]; owner != nil {
+						for key, probe := range e.mrcProbes {
+							if probe.owner == owner {
+								delete(e.mrcProbes, key)
+							}
+						}
+						delete(e.mrcReverse, reverseKey)
 					}
 					updateGaps()
 				}
@@ -278,6 +308,15 @@ func (e *Engine) runReceiver(ctx context.Context) error {
 			return err
 		}
 		f, err := wire.ParseEthernetFrame(buf[:n], e.cfg.IPProto)
+		if err == nil {
+			handled, controlErr := e.handleMRC(f, time.Now())
+			if controlErr != nil {
+				return controlErr
+			}
+			if handled {
+				continue
+			}
+		}
 		if err != nil || f.Type != wire.TypeData || !local[f.DstIP] || !e.acceptsEncap(f.Encap) {
 			continue
 		}

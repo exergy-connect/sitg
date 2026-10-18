@@ -10,17 +10,20 @@ import (
 type Stats struct {
 	role string
 
-	PacketsSent atomic.Uint64
-	Retransmits atomic.Uint64
-	PacketsRecv atomic.Uint64
-	Duplicates  atomic.Uint64
-	RTXFlagged  atomic.Uint64
-	SACKsSent   atomic.Uint64
-	SACKsRecv   atomic.Uint64
-	BytesSent   atomic.Uint64
-	BytesAcked  atomic.Uint64
-	BytesUnique atomic.Uint64
-	GapsOpen    atomic.Uint64
+	PacketsSent          atomic.Uint64
+	Retransmits          atomic.Uint64
+	PacketsRecv          atomic.Uint64
+	Duplicates           atomic.Uint64
+	RTXFlagged           atomic.Uint64
+	SACKsSent            atomic.Uint64
+	SACKsRecv            atomic.Uint64
+	EVProbesSent         atomic.Uint64
+	EVProbesAcked        atomic.Uint64
+	ReverseEVDataUpdates atomic.Uint64
+	BytesSent            atomic.Uint64
+	BytesAcked           atomic.Uint64
+	BytesUnique          atomic.Uint64
+	GapsOpen             atomic.Uint64
 
 	rttCount atomic.Uint64
 	rttSumNs atomic.Uint64
@@ -109,6 +112,14 @@ func (s *Stats) ProgressLine() string {
 }
 
 func (s *Stats) FinalReport() string {
+	report := s.finalReport()
+	if s.EVProbesSent.Load() > 0 || s.EVProbesAcked.Load() > 0 || s.ReverseEVDataUpdates.Load() > 0 {
+		report += fmt.Sprintf("EV probes sent: %d; acknowledged: %d; reverse EV data-SACK updates: %d\n", s.EVProbesSent.Load(), s.EVProbesAcked.Load(), s.ReverseEVDataUpdates.Load())
+	}
+	return report
+}
+
+func (s *Stats) finalReport() string {
 	elapsed := s.Elapsed()
 	if s.role == "send" {
 		sent := s.PacketsSent.Load()

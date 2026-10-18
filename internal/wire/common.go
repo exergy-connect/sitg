@@ -31,31 +31,39 @@ const (
 type PacketType uint8
 
 const (
-	TypeData PacketType = 0
-	TypeSACK PacketType = 1
+	TypeData         PacketType = 0
+	TypeSACK         PacketType = 1
+	TypeEVProbe      PacketType = 2
+	TypeEVProbeReply PacketType = 3
+	TypeNACK         PacketType = 4
 )
 
 // Frame is a decoded transport packet.
 type Frame struct {
-	Type      PacketType
-	Proto     string // "uet", "mrc", or "falcon"
-	Encap     string
-	SrcIP     netip.Addr
-	DstIP     netip.Addr
-	SrcMAC    net.HardwareAddr
-	DstMAC    net.HardwareAddr
-	Entropy   uint16
-	PSN       uint32
-	QP        uint32
-	MsgID     uint32
-	Offset    uint32
-	Length    uint32
-	RTX       bool
-	CumAck    uint32
-	Bitmap    uint64
-	Payload   []byte
-	OuterSRv6 bool
-	OuterDst  netip.Addr
+	Type        PacketType
+	Proto       string // "uet", "mrc", or "falcon"
+	Encap       string
+	SrcIP       netip.Addr
+	DstIP       netip.Addr
+	SrcMAC      net.HardwareAddr
+	DstMAC      net.HardwareAddr
+	Entropy     uint16
+	MRCEV       uint32 // complete routing EV from this packet header
+	AckPSN      uint32
+	Congestion  uint8
+	ReflectedEV uint32 // forward EV in SETH; independent of the ACK routing EV
+	ProbeID     uint16
+	PSN         uint32
+	QP          uint32
+	MsgID       uint32
+	Offset      uint32
+	Length      uint32
+	RTX         bool
+	CumAck      uint32
+	Bitmap      uint64
+	Payload     []byte
+	OuterSRv6   bool
+	OuterDst    netip.Addr
 }
 
 // BuildOpts controls Ethernet/IP/UDP/SRv6 framing.
@@ -67,6 +75,7 @@ type BuildOpts struct {
 	Encap     string // udp6|udp4|ip6|ip4
 	IPProto   uint8  // for native UET
 	Entropy   uint16
+	FlowLabel *uint32 // nil uses the protocol default
 	UseSRv6   bool
 	SRv6Dst   netip.Addr
 	SRv6SrcIP netip.Addr // outer IPv6 source when UseSRv6 (required for IPv4 inner)
@@ -184,6 +193,10 @@ func WrapEthernetIP(opts BuildOpts, transportPayload []byte, udpDstPort uint16, 
 		hopLimit = 64
 	}
 
+	flowLabel := uint32(opts.Entropy)
+	if opts.FlowLabel != nil {
+		flowLabel = *opts.FlowLabel
+	}
 	var inner []byte
 	if useUDP {
 		udpLen := UDPHeaderLen + len(transportPayload)
@@ -221,7 +234,7 @@ func WrapEthernetIP(opts BuildOpts, transportPayload []byte, udpDstPort uint16, 
 		if !useUDP {
 			next = opts.IPProto
 		}
-		writeIPv6(ipPkt, opts.SrcIP, opts.DstIP, len(inner), next, hopLimit, uint32(opts.Entropy))
+		writeIPv6(ipPkt, opts.SrcIP, opts.DstIP, len(inner), next, hopLimit, flowLabel)
 		copy(ipPkt[IPv6HeaderLen:], inner)
 	}
 
@@ -241,7 +254,7 @@ func WrapEthernetIP(opts BuildOpts, transportPayload []byte, udpDstPort uint16, 
 			innerNH = IPProtoIPv4
 		}
 		outer := make([]byte, IPv6HeaderLen+len(ipPkt))
-		writeIPv6(outer, outerSrc, opts.SRv6Dst, len(ipPkt), innerNH, hopLimit, uint32(opts.Entropy))
+		writeIPv6(outer, outerSrc, opts.SRv6Dst, len(ipPkt), innerNH, hopLimit, flowLabel)
 		copy(outer[IPv6HeaderLen:], ipPkt)
 		ipPkt = outer
 		ipv4 = false

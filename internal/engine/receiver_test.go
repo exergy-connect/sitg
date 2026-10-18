@@ -209,20 +209,23 @@ func TestReceiverAllWithOneAddressFamily(t *testing.T) {
 	}
 }
 
-func TestReceiverACKCyclesExplicitSRv6Paths(t *testing.T) {
+func TestReceiverACKCyclesConfirmedPlanes(t *testing.T) {
 	paths := []netip.Addr{netip.MustParseAddr("5f00:0:100:301::"), netip.MustParseAddr("5f00:0:101:301::")}
 	local := netip.MustParseAddr("5f00:0:302::")
 	peer := netip.MustParseAddr("5f00:0:301::")
 	sock := &receiverTestSocket{out: make(chan []byte, 3)}
 	e := &Engine{
-		cfg:  &config.Config{Role: config.RoleRecv, Encap: config.EncapAll, Entropy: config.EntropySRv6},
+		cfg:  &config.Config{Proto: config.ProtoMRC, EVPlanes: []int{0, 1}, Role: config.RoleRecv, Encap: config.EncapAll, Entropy: config.EntropySRv6},
 		sock: sock, ep: &link.Endpoint{SrcIPv6: local, SrcMAC: net.HardwareAddr{2, 0, 0, 0, 0, 2}},
 		paths: paths, stats: NewStats("recv"),
 		dstMAC: map[netip.Addr]net.HardwareAddr{
 			paths[0]: {2, 0, 0, 0, 0, 10}, paths[1]: {2, 0, 0, 0, 0, 11},
 		},
 	}
-	c := &falconConnection{localIP: local, peer: peer, encap: "udp6", remoteCID: 1, tracker: NewRecvTracker(), last: &wire.Frame{Proto: "mrc", Entropy: 10000}}
+	c := &falconConnection{localIP: local, peer: peer, encap: "udp6", remoteCID: 1, tracker: NewRecvTracker(), last: &wire.Frame{Proto: "mrc", Entropy: 10000, MRCEV: 10000}}
+	reverse := e.reversePeer(mrcReverseKey{local, peer, "udp6", 1})
+	reverse.good[0] = mrcProof{0, time.Now()}
+	reverse.good[1] = mrcProof{1, time.Now()}
 	c.tracker.Observe(0)
 	for i := 0; i < 3; i++ {
 		if err := e.receiverACK(c); err != nil {

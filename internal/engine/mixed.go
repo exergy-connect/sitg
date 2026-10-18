@@ -132,6 +132,9 @@ func (e *Engine) runMixedSend(ctx context.Context) error {
 		if err := e.sock.Send(raw); err != nil {
 			return err
 		}
+		if f.proto == config.ProtoMRC {
+			e.noteMRCData(opts, e.cfg.QP, pkt.PSN, time.Now())
+		}
 		e.stats.MarkStart()
 		e.stats.PacketsSent.Add(1)
 		e.stats.BytesSent.Add(uint64(pkt.Bytes))
@@ -158,6 +161,9 @@ func (e *Engine) runMixedSend(ctx context.Context) error {
 		return err
 	}
 	for {
+		if err := e.serviceMRC(time.Now()); err != nil {
+			return err
+		}
 		select {
 		case <-ctx.Done():
 			return nil
@@ -175,6 +181,15 @@ func (e *Engine) runMixedSend(ctx context.Context) error {
 				return err
 			}
 			ack, err := wire.ParseEthernetFrame(buf[:n], e.cfg.IPProto)
+			if err == nil {
+				handled, controlErr := e.handleMRC(ack, time.Now())
+				if controlErr != nil {
+					return controlErr
+				}
+				if handled {
+					continue
+				}
+			}
 			if err != nil || ack.Type != wire.TypeSACK || ack.DstIP != src || ack.Encap != string(e.cfg.Encap) {
 				continue
 			}
@@ -189,6 +204,9 @@ func (e *Engine) runMixedSend(ctx context.Context) error {
 			}
 			if f == nil || ack.CumAck > f.window.nextPSN {
 				continue
+			}
+			if ack.Proto == "mrc" {
+				e.noteMRCSACK(ack, time.Now())
 			}
 			acked, _, rtt := f.window.ApplySACK(ack.CumAck, ack.Bitmap, time.Now())
 			e.stats.SACKsRecv.Add(1)

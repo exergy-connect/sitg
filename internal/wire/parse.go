@@ -111,6 +111,12 @@ func parseIP(payload []byte, isIPv6 bool, ipProto uint8, dstMAC, srcMAC net.Hard
 		f.SrcMAC = srcMAC
 		f.DstMAC = dstMAC
 		f.Entropy = entropy
+		if f.Proto == "mrc" {
+			f.MRCEV = uint32(entropy)
+			if isIPv6 {
+				f.MRCEV |= (binary.BigEndian.Uint32(payload[:4]) & 0xffff) << 16
+			}
+		}
 		f.Encap = encap
 		f.OuterSRv6 = outerSRv6
 		f.OuterDst = outerDst
