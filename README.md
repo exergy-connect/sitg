@@ -104,6 +104,7 @@ beyond those limits are rejected or ignored. UET/MRC flow state remains until re
 | `--hops` | `3` | uSID hops per path (1–6) |
 | `--radix` | `32` | Fabric radix for path encoding |
 | `--usid-base` | `0x0100` | Base 16-bit uSID value |
+| `--srv6-paths` | unset | Comma-separated explicit outer IPv6 destinations; requires `--entropy srv6`; receiver applies them to ACKs |
 | `--qp` | `1` | Queue pair / PDC identifier; Falcon CM service and first local receive CID |
 | `--falcon-cm-port` | `4795` | TCP port for SITG connection setup and flow reset |
 | `--reset-receiver` | `false` | Sender: reset matching UET/MRC receiver flows before sending |
@@ -137,6 +138,21 @@ The lab profile uses preconfigured symmetric 24-bit QPs, a synthetic memory regi
 
 - **`ecmp`** — Path entropy in the encapsulation field (UDP source port, or native entropy header). Also set as the IPv6 flow label when applicable.
 - **`srv6`** — Outer IPv6 header whose destination is a uN-style uSID address: 32-bit locator + up to six 16-bit uSIDs. The inner packet keeps `--encap`. Path `i` uses `hop_k = usid-base + (i / radix^k) % radix`. Outer next-header is `41` (IPv6) or `4` (IPv4). Requires an IPv6 address on the interface for the outer source.
+
+Use `--srv6-paths` to supply actual fabric paths instead of the algorithmic generator. Senders cycle through the supplied destinations; a single destination pins the outer path. `--dst` remains the inner destination. Receivers can supply their own reverse paths, which are cycled independently for ACKs while preserving the inner flow addresses and encapsulation. The interface must have IPv6 connectivity to every supplied outer destination.
+
+For the two-spine lab, configure the receiver's reverse paths and then send at 1 packet per second:
+
+```bash
+# client2: encapsulate ACKs toward client1 through either spine
+sudo ./sitg --role recv --iface eth1 --proto mrc --encap udp6 \
+  --entropy srv6 --srv6-paths 5f00:0:100:301::,5f00:0:101:301:: --duration 0s
+
+# client1: encapsulate MRC traffic toward client2 through either spine
+sudo ./sitg --role send --iface eth1 --proto mrc --encap udp6 \
+  --dst 5f00:0:302:: --entropy srv6 \
+  --srv6-paths 5f00:0:100:302::,5f00:0:101:302:: --rate 1pps --duration 60s
+```
 
 ### Traffic patterns (`--pattern`)
 

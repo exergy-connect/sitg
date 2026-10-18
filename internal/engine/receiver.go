@@ -45,6 +45,18 @@ func (e *Engine) receiverACK(c *falconConnection) error {
 	}
 	cum, bm, _ := c.tracker.Snapshot()
 	opts := wire.BuildOpts{SrcMAC: e.ep.SrcMAC, DstMAC: c.last.SrcMAC, SrcIP: c.localIP, DstIP: c.peer, Encap: c.encap, IPProto: e.cfg.IPProto, Entropy: c.last.Entropy}
+	if len(e.paths) > 0 {
+		var err error
+		opts, err = e.buildOpts(c.peer, c.last.Entropy, e.ackPath)
+		if err != nil {
+			return err
+		}
+		// Generic receivers accept multiple inner encapsulations. Preserve
+		// this flow's addresses/encapsulation inside the routed ACK wrapper.
+		opts.SrcIP = c.localIP
+		opts.Encap = c.encap
+		e.ackPath = (e.ackPath + 1) % len(e.paths)
+	}
 	var raw []byte
 	var err error
 	switch c.last.Proto {

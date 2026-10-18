@@ -24,13 +24,14 @@ type packetSocket interface {
 
 // Engine runs a send or recv session.
 type Engine struct {
-	cfg    *config.Config
-	sock   packetSocket
-	ep     *link.Endpoint
-	stats  *Stats
-	paths  []netip.Addr
-	dstMAC map[netip.Addr]net.HardwareAddr
-	sel    *pattern.Selector
+	cfg     *config.Config
+	sock    packetSocket
+	ep      *link.Endpoint
+	stats   *Stats
+	paths   []netip.Addr
+	ackPath int
+	dstMAC  map[netip.Addr]net.HardwareAddr
+	sel     *pattern.Selector
 }
 
 func New(cfg *config.Config, sock *link.Socket) (*Engine, error) {
@@ -43,7 +44,9 @@ func New(cfg *config.Config, sock *link.Socket) (*Engine, error) {
 		dstMAC: make(map[netip.Addr]net.HardwareAddr),
 		sel:    pattern.New(cfg),
 	}
-	if cfg.Role == config.RoleSend && cfg.Entropy == config.EntropySRv6 {
+	if cfg.Entropy == config.EntropySRv6 && len(cfg.SRv6Paths) > 0 {
+		e.paths = append([]netip.Addr(nil), cfg.SRv6Paths...)
+	} else if cfg.Role == config.RoleSend && cfg.Entropy == config.EntropySRv6 {
 		paths, err := wire.AllPaths(wire.PathParams{
 			Locator:  cfg.Locator,
 			Paths:    cfg.Paths,

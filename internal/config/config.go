@@ -80,6 +80,7 @@ type Config struct {
 	Hops           int
 	Radix          int
 	USIDBase       uint16
+	SRv6Paths      []netip.Addr
 	AcceptAnyQP    bool
 	ResetReceiver  bool
 	QP             uint32
@@ -115,6 +116,7 @@ func Parse(args []string) (*Config, error) {
 	paths := fs.Int("paths", 64, "number of SRv6 paths / entropy values")
 	hops := fs.Int("hops", 3, "uSID hops per path (max 6)")
 	radix := fs.Int("radix", 32, "fabric radix for path encoding")
+	srv6Paths := fs.String("srv6-paths", "", "comma-separated explicit compressed uSID IPv6 destinations")
 	usidBase := fs.String("usid-base", "0x0100", "base 16-bit uSID value")
 	qp := fs.Uint("qp", 1, "queue pair / PDC identifier")
 	resetReceiver := fs.Bool("reset-receiver", false, "sender: reset peer UET/MRC reliability state before sending")
@@ -190,6 +192,26 @@ func Parse(args []string) (*Config, error) {
 	}
 	if cfg.USIDBase, err = parseUint16(*usidBase); err != nil {
 		return nil, fmt.Errorf("usid-base: %w", err)
+	}
+
+	explicitPaths := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "srv6-paths" {
+			explicitPaths = true
+		}
+	})
+	if explicitPaths {
+		if cfg.Entropy != EntropySRv6 {
+			return nil, fmt.Errorf("srv6-paths requires entropy srv6")
+		}
+		for _, text := range strings.Split(*srv6Paths, ",") {
+			addr, err := netip.ParseAddr(text)
+			if err != nil || !addr.Is6() || addr.Is4In6() || addr.Zone() != "" {
+				return nil, fmt.Errorf("srv6-paths: invalid IPv6 container %q", text)
+			}
+			cfg.SRv6Paths = append(cfg.SRv6Paths, addr)
+		}
+		cfg.Paths = len(cfg.SRv6Paths)
 	}
 
 	if *dst != "" {

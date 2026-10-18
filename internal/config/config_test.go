@@ -134,3 +134,22 @@ func TestReceiveAll(t *testing.T) {
 		}
 	}
 }
+
+func TestExplicitSRv6Paths(t *testing.T) {
+	paths := "5f00:0:100:302::,5f00:0:101:302::"
+	cfg, err := Parse([]string{"--iface", "eth1", "--role", "send", "--dst", "2001:db8::2", "--proto", "mrc", "--entropy", "srv6", "--srv6-paths", paths})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Paths != 2 || len(cfg.SRv6Paths) != 2 || cfg.SRv6Paths[1].String() != "5f00:0:101:302::" {
+		t.Fatalf("explicit paths not preserved: %+v", cfg)
+	}
+	for _, bad := range []string{"", "5f00::,", "192.0.2.1", "::ffff:192.0.2.1", "bad", "fe80::1%eth1"} {
+		if _, err := Parse([]string{"--iface", "eth1", "--entropy", "srv6", "--srv6-paths", bad}); err == nil {
+			t.Fatalf("accepted invalid path %q", bad)
+		}
+	}
+	if _, err := Parse([]string{"--iface", "eth1", "--srv6-paths", paths}); err == nil {
+		t.Fatal("accepted explicit SRv6 paths without SRv6 entropy")
+	}
+}
