@@ -31,6 +31,8 @@ This document proposes selective uSID advancement for SRv6 fabrics. The transmit
 
 AI backend fabrics carry accelerator traffic whose throughput and completion time depend on congestion, loss, and path utilization. Multipath transports can select paths or distribute packets across them, but independent ECMP choices at successive stages can limit their control over the physical route.
 
+Conventional SRv6 encapsulation adds an outer IPv6 header to carry the path. This design instead puts the path in the packet's existing IPv6 Destination Address and updates that address as the packet crosses the fabric. For paths that fit in that address, no outer IPv6 header or Segment Routing Header is added.
+
 SRv6 network programming {{RFC8986}} and compressed SID encoding {{RFC9800}} provide the basis for expressing a path in an IPv6 Destination Address. This document uses *uSID* for a compressed SID using the NEXT-CSID flavor. The transmitting NIC selects the path, the leaves forward using ordinary IPv6 routing, and intermediate spines and super-spines advance the encoded sequence.
 
 The related draft *SRv6 for Deterministic Path Placement in AI Backends* describes NIC-selected uSID programs using an outer IPv6 header and illustrates uSID processing at both leaves and spines {{I-D.filsfils-srv6ops-srv6-ai-backend}}. This proposal instead carries the path in the existing IPv6 Destination Address. The ingress leaf forwards toward the first spine without advancing the sequence; only intermediate fabric nodes advance it. The destination leaf forwards the packet to the receiving endpoint without decapsulation.
@@ -51,33 +53,40 @@ NIC1 sends the packet with Destination Address:
 
 `5f00:0000:0500:0300:0000:0000:0000:0042`
 
-The packet is processed as follows:
+The table shows the Destination Address on arrival at each node and the action taken there. Spine5 performs the only address shift in this path.
 
-1. Leaf1 matches `5f00:0000:0500::/48` and forwards toward Spine5, leaving the address unchanged.
-2. Spine5 executes its configured NEXT-CSID behavior. With the example's field widths, it shifts the suffix following `0500` left by 16 bits and appends 16 zero bits. The resulting address is `5f00:0000:0300:0000:0000:0000:0042:0000`.
-3. Spine5's lookup of the resulting address selects the route toward Leaf3.
-4. Leaf3 uses ordinary IPv6 forwarding to deliver that address to GPU3-042. It does not advance the sequence or remove a header.
-5. GPU3-042 accepts the terminal address and processes the transport payload.
+| Node | Destination Address on arrival | Action |
+| ---- | ------------------------------ | ------ |
+| Leaf1 | `5f00:0000:0500:0300:0000:0000:0000:0042` | Match `5f00:0000:0500::/48`; forward to Spine5 with the address unchanged. |
+| Spine5 | `5f00:0000:0500:0300:0000:0000:0000:0042` | Execute NEXT-CSID: shift the suffix after `0500` left by 16 bits and append 16 zero bits. Look up the resulting address and forward to Leaf3. |
+| Leaf3 | `5f00:0000:0300:0000:0000:0000:0042:0000` | Route the terminal address to GPU3-042 with the address unchanged. |
+| GPU3-042 | `5f00:0000:0300:0000:0000:0000:0042:0000` | Accept the terminal address and process the transport payload. |
 
-The GPU identifier shifts with the suffix. GPU3-042 is assigned the resulting terminal address, and Leaf3 routes that address to it.
+The shift moves the entire suffix, including the GPU identifier. Thus, the initial suffix ending in `0042` becomes a terminal address ending in `0042:0000`. GPU3-042 accepts this address because it is assigned that exact terminal address; recognition of the identifier `0042` alone is not sufficient. Leaf3 has a route delivering the terminal address to GPU3-042. Neither Leaf3 nor the GPU reverses the shift or removes an encapsulating header.
 
 # Addressing and Forwarding State
+
+Every node on the selected path needs forwarding state appropriate to its role. The source encoding and that state must agree:
+
+* Ingress leaves need routes toward the supported first-intermediate-node prefixes.
+* Intermediate nodes need local NEXT-CSID instructions and onward forwarding state.
+* Destination leaves need routes delivering terminal addresses to their intended GPU nodes, and receiving endpoints must accept those addresses.
+
+These entries serve multiple flows without per-flow forwarding state. The installed next hops determine the physical links used, including any ECMP choices.
+
+## Address Encoding
 
 The source needs the common block, intermediate-node identifiers, relevant NEXT-CSID field widths, and a destination encoding that produces an address accepted by the receiving endpoint. An ingress-leaf instruction is unnecessary because the packet already arrives at that leaf; its route toward the first encoded intermediate node selects the uplink. The destination-leaf prefix is used for routing, not as an instruction executed by that leaf.
 
 The address plan must accommodate both the selected intermediate sequence and the target GPU node identifier within 128 bits. Additional intermediate nodes consume address space and shift the destination encoding again. Identifier width depends on the space remaining after the path encoding. Programs of different lengths need destination encodings that account for their respective shifts; this draft leaves that allocation procedure open.
 
+## Intermediate-Node Processing
+
 NEXT-CSID processing follows Section 4.1 of {{RFC9800}}, which extends endpoint behaviors from {{RFC8986}}. It is distinct from ordinary IPv6 forwarding: an ingress leaf can match a prefix covering the active intermediate-node identifier without interpreting or changing the following address fields. Likewise, the destination leaf routes the terminal address without consuming it as a SID.
 
-Provisioning must establish three kinds of state:
+## Provisioning
 
-* Routes at ingress leaves toward the supported first-intermediate-node prefixes.
-* Local NEXT-CSID instructions and onward forwarding state at intermediate nodes.
-* Routes at destination leaves delivering terminal addresses to their intended GPU nodes.
-
-These entries serve multiple flows without per-flow forwarding state. The installed next hops determine the physical links used, including any ECMP choices.
-
-An orchestrator, routing protocols, or another provisioning system supplies topology information and forwarding state. The source encoding and installed state must agree.
+An orchestrator, routing protocols, or another provisioning system supplies topology information and installs the required forwarding state. The choice of provisioning mechanism does not change the forwarding rules above. It must keep source encodings, intermediate-node behavior, destination-leaf routes, and endpoint address assignments consistent.
 
 # Deployment Considerations
 
