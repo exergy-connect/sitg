@@ -81,6 +81,8 @@ type Config struct {
 	Radix          int
 	USIDBase       uint16
 	SRv6Paths      []netip.Addr
+	SRv6Mode       string
+	SRv6Shifts     int
 	EVPlanes       []int
 	ReverseRTT     time.Duration
 	AcceptAnyQP    bool
@@ -120,6 +122,8 @@ func Parse(args []string) (*Config, error) {
 	radix := fs.Int("radix", 32, "fabric radix for path encoding")
 	evPlanes := fs.String("ev-planes", "", "comma-separated plane IDs for SRv6 paths (default: all in plane 0)")
 	reverseRTT := fs.Duration("reverse-rtt", time.Millisecond, "initial RTT for MRC reverse-path EV probing; refined from replies")
+	srv6Mode := fs.String("srv6-mode", "encap", "SRv6 forwarding: encap|native")
+	srv6Shifts := fs.Int("srv6-shifts", 1, "native F3216 NEXT-CSID advancements before endpoint delivery")
 	srv6Paths := fs.String("srv6-paths", "", "comma-separated explicit compressed uSID IPv6 destinations")
 	usidBase := fs.String("usid-base", "0x0100", "base 16-bit uSID value")
 	qp := fs.Uint("qp", 1, "queue pair / PDC identifier")
@@ -165,6 +169,8 @@ func Parse(args []string) (*Config, error) {
 		SackEvery:      *sackEvery,
 		RTO:            *rto,
 		Entropy:        EntropyMode(*entropy),
+		SRv6Mode:       *srv6Mode,
+		SRv6Shifts:     *srv6Shifts,
 		Paths:          *paths,
 		Hops:           *hops,
 		Radix:          *radix,
@@ -341,6 +347,34 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("invalid pattern")
 	}
+	if c.SRv6Mode != "encap" && c.SRv6Mode != "native" {
+		return fmt.Errorf("srv6-mode must be encap or native")
+	}
+	if c.SRv6Mode == "native" {
+		if c.Entropy != EntropySRv6 || len(c.SRv6Paths) == 0 {
+			return fmt.Errorf("native SRv6 requires --entropy srv6 and explicit --srv6-paths")
+		}
+		if c.Encap != EncapUDP6 && c.Encap != EncapIP6 {
+			return fmt.Errorf("native SRv6 requires --encap udp6 or ip6")
+		}
+		if c.SRv6Shifts < 1 || c.SRv6Shifts > 5 {
+			return fmt.Errorf("srv6-shifts must be 1..5")
+		}
+		terminal := c.NativeDestination(c.SRv6Paths[0])
+		for _, path := range c.SRv6Paths {
+			if c.NativeDestination(path) != terminal {
+				return fmt.Errorf("native SRv6 paths must reach the same terminal address")
+			}
+		}
+		for _, peer := range c.Peers {
+			if peer != terminal {
+				return fmt.Errorf("native SRv6 terminal %s does not match peer %s", terminal, peer)
+			}
+		}
+		if c.Role == RoleSend && c.Dst.IsValid() && c.Dst != terminal {
+			return fmt.Errorf("native SRv6 terminal %s does not match --dst %s", terminal, c.Dst)
+		}
+	}
 	switch c.Entropy {
 	case EntropyECMP, EntropySRv6:
 	default:
@@ -492,4 +526,14 @@ func parseDurationSeconds(raw string) (time.Duration, error) {
 		return 0, fmt.Errorf("integer seconds out of range")
 	}
 	return time.Duration(seconds) * time.Second, nil
+}
+
+// NativeDestination applies the configured F3216 shifts, preserving the /32 block.
+func (c *Config) NativeDestination(path netip.Addr) netip.Addr {
+	b := path.As16()
+	for i := 0; i < c.SRv6Shifts; i++ {
+		copy(b[4:14], b[6:16])
+		b[14], b[15] = 0, 0
+	}
+	return netip.AddrFrom16(b)
 }

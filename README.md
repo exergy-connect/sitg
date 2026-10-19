@@ -104,7 +104,9 @@ beyond those limits are rejected or ignored. UET/MRC flow state remains until re
 | `--hops` | `3` | uSID hops per path (1–6) |
 | `--radix` | `32` | Fabric radix for path encoding |
 | `--usid-base` | `0x0100` | Base 16-bit uSID value |
-| `--srv6-paths` | unset | Comma-separated explicit outer IPv6 destinations; requires `--entropy srv6`; MRC receivers use confirmed reverse EVs for ACKs |
+| `--srv6-paths` | unset | Comma-separated explicit path-encoded IPv6 destinations; requires `--entropy srv6`; MRC receivers use confirmed reverse EVs for ACKs |
+| `--srv6-mode` | `encap` | `encap` adds an outer IPv6 header; `native` encodes the path in the existing IPv6 header |
+| `--srv6-shifts` | `1` | Native mode: number of F3216 NEXT-CSID advancements before endpoint delivery (`1..5`) |
 | `--ev-planes` | all plane 0 | Comma-separated plane IDs, one per SRv6 path |
 | `--reverse-rtt` | `1ms` | Initial MRC reverse-probe RTT estimate, refined from successful replies |
 | `--qp` | `1` | Queue pair / PDC identifier; Falcon CM service and first local receive CID |
@@ -155,6 +157,46 @@ sudo ./sitg --role send --iface eth1 --proto mrc --encap udp6 \
   --dst 5f00:0:302:: --entropy srv6 \
   --srv6-paths 5f00:0:100:302::,5f00:0:101:302:: --rate 1pps --duration 60s
 ```
+
+### Native SRv6 forwarding
+
+`--entropy srv6 --srv6-mode native` implements the packet model in
+[Selective uSID Advancement in SRv6 Fabrics](docs/mrc-ietf-draft.md).
+The packet has one IPv6 header, with the explicit path program in its Destination
+Address and UDP (or native UET with `--encap ip6`) directly following it. Leaves
+forward ordinary IPv6; only intermediate spines and super-spines advance the
+program. There is no outer header, SRH, or leaf decapsulation.
+
+Native mode requires explicit `--srv6-paths`, `--encap udp6` or `ip6`, and a
+32-bit block with 16-bit uSIDs (F3216). `--srv6-shifts` specifies the number of
+advancements applied to every configured path. The default is one spine shift;
+it is independent of the algorithmic path generator's `--hops`. All paths must
+produce the same terminal address. Senders set `--dst` to that terminal address.
+A receiver's configured paths must terminate at the peer to which it sends ACKs
+and EV probes. A mismatched peer is rejected rather than sent on another path.
+
+Assign the terminal addresses to the respective client interfaces. For example,
+with client1 at `5f00:0:200::1:0` and GPU3-042 at `5f00:0:300::42:0`:
+
+```bash
+# GPU3-042: reverse candidates reach client1 after one spine shift.
+sitg --role recv --proto mrc --encap udp6 --iface eth1 \
+  --entropy srv6 --srv6-mode native --srv6-shifts 1 \
+  --srv6-paths 5f00:0:500:200::1,5f00:0:600:200::1 --duration 0s
+
+# Client1: forward candidates reach GPU3-042 after one spine shift.
+sitg --role send --proto mrc --encap udp6 --iface eth1 \
+  --dst 5f00:0:300::42:0 --entropy srv6 --srv6-mode native \
+  --srv6-shifts 1 --srv6-paths 5f00:0:500:300::42,5f00:0:600:300::42 \
+  --rate 1pps --duration 60s
+```
+
+UDP checksums and transport integrity fields use the terminal destination, so
+they remain valid after advancement. MRC ACKs, NACK handling, and reverse EV
+probes use the same native construction and existing EV-to-path mapping.
+The parser receives the resulting ordinary IPv6 packet; no native-mode marker
+is added to the wire. Existing encapsulated SRv6 remains the default and
+continues to support IPv4 or IPv6 inner packets.
 
 ### MRC reverse EV maintenance
 

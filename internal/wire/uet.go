@@ -132,7 +132,7 @@ func BuildUETFrame(opts BuildOpts, transport []byte) ([]byte, error) {
 		return nil, err
 	}
 	ip := EthernetHeaderLen
-	if opts.UseSRv6 {
+	if opts.UseSRv6 && !opts.NativeSRv6 {
 		ip += IPv6HeaderLen
 	}
 	addr := ip + 8
@@ -142,7 +142,19 @@ func BuildUETFrame(opts BuildOpts, transport []byte) ([]byte, error) {
 	if len(transport) < 4 {
 		return nil, ErrShortPacket
 	}
-	crc := crc32.Checksum(frame[addr:len(frame)-4], crc32.MakeTable(crc32.Castagnoli))
+	invariant := append([]byte(nil), frame[addr:len(frame)-4]...)
+	if opts.NativeSRv6 {
+		copy(invariant[16:32], opts.DstIP.AsSlice())
+		if opts.Encap == "udp6" {
+			invariant[IPv6HeaderLen-8+6], invariant[IPv6HeaderLen-8+7] = 0, 0
+		}
+	}
+	crc := crc32.Checksum(invariant, crc32.MakeTable(crc32.Castagnoli))
 	binary.BigEndian.PutUint32(frame[len(frame)-4:], crc)
+	if opts.NativeSRv6 && opts.Encap == "udp6" {
+		udp := frame[ip+IPv6HeaderLen:]
+		udp[6], udp[7] = 0, 0
+		binary.BigEndian.PutUint16(udp[6:8], UDPChecksumIPv6(opts.SrcIP, opts.DstIP, uint16(len(udp)), udp))
+	}
 	return frame, nil
 }

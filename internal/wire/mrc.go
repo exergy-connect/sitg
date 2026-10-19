@@ -157,7 +157,7 @@ func BuildMRCFrame(opts BuildOpts, transport []byte) ([]byte, error) {
 		return nil, err
 	}
 	ip := EthernetHeaderLen
-	if opts.UseSRv6 {
+	if opts.UseSRv6 && !opts.NativeSRv6 {
 		ip += IPv6HeaderLen
 	}
 	hdr := IPv6HeaderLen
@@ -166,6 +166,9 @@ func BuildMRCFrame(opts BuildOpts, transport []byte) ([]byte, error) {
 	}
 	udp := ip + hdr
 	invariant := append([]byte(nil), frame[ip:len(frame)-4]...)
+	if opts.NativeSRv6 {
+		copy(invariant[24:40], opts.DstIP.AsSlice())
+	}
 	if hdr == IPv4HeaderLen {
 		invariant[1] = 0xff
 		invariant[8] = 0xff

@@ -166,3 +166,29 @@ func TestReverseEVPlaneConfiguration(t *testing.T) {
 		}
 	}
 }
+
+func TestNativeSRv6Config(t *testing.T) {
+	args := []string{"--iface", "eth1", "--proto", "mrc", "--encap", "udp6", "--dst", "5f00:0:300::42:0", "--entropy", "srv6", "--srv6-mode", "native", "--srv6-paths", "5f00:0:500:300::42,5f00:0:600:300::42"}
+	cfg, err := Parse(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NativeDestination(cfg.SRv6Paths[0]) != cfg.Dst {
+		t.Fatal("wrong native terminal")
+	}
+	for _, extra := range [][]string{{"--srv6-mode", "bad"}, {"--encap", "udp4"}, {"--srv6-shifts", "0"}, {"--srv6-shifts", "6"}, {"--dst", "5f00::1"}, {"--srv6-paths", "5f00:0:500:300::42,5f00:0:600:300::43"}, {"--entropy", "ecmp"}} {
+		if _, err := Parse(append(append([]string(nil), args...), extra...)); err == nil {
+			t.Fatalf("accepted invalid native config: %v", extra)
+		}
+	}
+}
+
+func TestNativeSRv6MultipleShifts(t *testing.T) {
+	cfg, err := Parse([]string{"--iface", "eth1", "--proto", "mrc", "--encap", "udp6", "--dst", "5f00:0:300::42:0:0", "--entropy", "srv6", "--srv6-mode", "native", "--srv6-shifts", "2", "--srv6-paths", "5f00:0:500:600:300::42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NativeDestination(cfg.SRv6Paths[0]) != cfg.Dst {
+		t.Fatal("two-shift terminal incorrect")
+	}
+}

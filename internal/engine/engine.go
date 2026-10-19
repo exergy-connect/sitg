@@ -175,6 +175,13 @@ func (e *Engine) buildOpts(dst netip.Addr, entropy uint16, pathIdx int) (wire.Bu
 	}
 	if e.cfg.Entropy == config.EntropySRv6 && len(e.paths) > 0 {
 		opts.UseSRv6 = true
+		if e.cfg.SRv6Mode == "native" {
+			terminal := e.cfg.NativeDestination(linkDst)
+			if terminal != dst {
+				return wire.BuildOpts{}, fmt.Errorf("native SRv6 path terminates at %s, not peer %s", terminal, dst)
+			}
+			opts.NativeSRv6 = true
+		}
 		opts.SRv6Dst = e.paths[pathIdx%len(e.paths)]
 		if e.ep.SrcIPv6.IsValid() {
 			opts.SRv6SrcIP = e.ep.SrcIPv6

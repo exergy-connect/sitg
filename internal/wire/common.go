@@ -68,19 +68,20 @@ type Frame struct {
 
 // BuildOpts controls Ethernet/IP/UDP/SRv6 framing.
 type BuildOpts struct {
-	SrcMAC    net.HardwareAddr
-	DstMAC    net.HardwareAddr
-	SrcIP     netip.Addr
-	DstIP     netip.Addr
-	Encap     string // udp6|udp4|ip6|ip4
-	IPProto   uint8  // for native UET
-	Entropy   uint16
-	FlowLabel *uint32 // nil uses the protocol default
-	UseSRv6   bool
-	SRv6Dst   netip.Addr
-	SRv6SrcIP netip.Addr // outer IPv6 source when UseSRv6 (required for IPv4 inner)
-	TOS       uint8
-	HopLimit  uint8
+	SrcMAC     net.HardwareAddr
+	DstMAC     net.HardwareAddr
+	SrcIP      netip.Addr
+	DstIP      netip.Addr
+	Encap      string // udp6|udp4|ip6|ip4
+	IPProto    uint8  // for native UET
+	Entropy    uint16
+	FlowLabel  *uint32 // nil uses the protocol default
+	UseSRv6    bool
+	NativeSRv6 bool // one IPv6 header; DstIP is the terminal checksum destination
+	SRv6Dst    netip.Addr
+	SRv6SrcIP  netip.Addr // outer IPv6 source when UseSRv6 (required for IPv4 inner)
+	TOS        uint8
+	HopLimit   uint8
 }
 
 func checksumFold(sum uint32) uint16 {
@@ -184,8 +185,12 @@ func writeEntropyHeader(buf []byte, entropy uint16) int {
 	return EntropyHeaderLen
 }
 
-// WrapEthernetIP builds Ethernet + optional SRv6 outer + IP(+UDP/entropy) around transportPayload.
+// WrapEthernetIP builds Ethernet/IP framing with optional encapsulated or native SRv6.
+// Native SRv6 writes SRv6Dst into the header and uses terminal DstIP for checksums.
 func WrapEthernetIP(opts BuildOpts, transportPayload []byte, udpDstPort uint16, zeroUDPChecksum bool) ([]byte, error) {
+	if opts.NativeSRv6 && (!opts.UseSRv6 || !opts.DstIP.Is6() || opts.DstIP.Is4In6() || !opts.SrcIP.Is6() || opts.SrcIP.Is4In6() || (opts.Encap != "udp6" && opts.Encap != "ip6") || !opts.SRv6Dst.Is6() || opts.SRv6Dst.Is4In6()) {
+		return nil, ErrInvalidSRv6
+	}
 	ipv4 := opts.Encap == "udp4" || opts.Encap == "ip4"
 	useUDP := opts.Encap == "udp4" || opts.Encap == "udp6"
 	hopLimit := opts.HopLimit
@@ -203,7 +208,7 @@ func WrapEthernetIP(opts BuildOpts, transportPayload []byte, udpDstPort uint16, 
 		inner = make([]byte, udpLen)
 		writeUDP(inner, opts.Entropy, udpDstPort, uint16(udpLen))
 		copy(inner[UDPHeaderLen:], transportPayload)
-		if !zeroUDPChecksum {
+		if !zeroUDPChecksum || opts.NativeSRv6 {
 			var csum uint16
 			if ipv4 {
 				csum = UDPChecksumIPv4(opts.SrcIP, opts.DstIP, uint16(udpLen), inner)
@@ -234,11 +239,15 @@ func WrapEthernetIP(opts BuildOpts, transportPayload []byte, udpDstPort uint16, 
 		if !useUDP {
 			next = opts.IPProto
 		}
-		writeIPv6(ipPkt, opts.SrcIP, opts.DstIP, len(inner), next, hopLimit, flowLabel)
+		dst := opts.DstIP
+		if opts.NativeSRv6 {
+			dst = opts.SRv6Dst
+		}
+		writeIPv6(ipPkt, opts.SrcIP, dst, len(inner), next, hopLimit, flowLabel)
 		copy(ipPkt[IPv6HeaderLen:], inner)
 	}
 
-	if opts.UseSRv6 {
+	if opts.UseSRv6 && !opts.NativeSRv6 {
 		if !opts.SRv6Dst.IsValid() || !opts.SRv6Dst.Is6() {
 			return nil, ErrInvalidSRv6
 		}

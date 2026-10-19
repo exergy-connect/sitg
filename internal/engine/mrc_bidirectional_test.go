@@ -15,8 +15,9 @@ import (
 )
 
 type mrcDuplexSocket struct {
-	in    chan []byte
-	peers map[netip.Addr]*mrcDuplexSocket
+	native bool
+	in     chan []byte
+	peers  map[netip.Addr]*mrcDuplexSocket
 }
 
 func (s *mrcDuplexSocket) SetNonblock(bool) error { return nil }
@@ -29,6 +30,15 @@ func (s *mrcDuplexSocket) Recv(buf []byte) (int, error) {
 	}
 }
 func (s *mrcDuplexSocket) Send(raw []byte) error {
+	if s.native {
+		raw = append([]byte(nil), raw...)
+		if len(raw) < 54 || raw[20] != 17 {
+			return wire.ErrInvalidSRv6
+		}
+		da := raw[38:54]
+		copy(da[4:14], da[6:16])
+		da[14], da[15] = 0, 0
+	}
 	f, err := wire.ParseEthernetFrame(raw, 253)
 	if err != nil {
 		return err
@@ -74,6 +84,37 @@ func TestMRCBidirectionalDataRefreshesReverseEVs(t *testing.T) {
 		}
 		if !healthy {
 			t.Fatal("data SACKs did not maintain a reverse EV")
+		}
+	}
+}
+
+func TestMRCNativeBidirectional(t *testing.T) {
+	a, b := netip.MustParseAddr("5f00:0:300::42:0"), netip.MustParseAddr("5f00:0:301::43:0")
+	sa, sb := &mrcDuplexSocket{in: make(chan []byte, 4096), native: true}, &mrcDuplexSocket{in: make(chan []byte, 4096), native: true}
+	peers := map[netip.Addr]*mrcDuplexSocket{a: sa, b: sb}
+	sa.peers, sb.peers = peers, peers
+	makeEngine := func(local, peer netip.Addr, paths string, sock *mrcDuplexSocket) *Engine {
+		cfg, err := config.Parse([]string{"--role", "send", "--iface", "lo", "--proto", "mrc", "--encap", "udp6", "--dst", peer.String(), "--entropy", "srv6", "--srv6-mode", "native", "--srv6-paths", paths, "--dst-mac", "02:00:00:00:00:02", "--rate", "1000pps", "--pkt-size", "64", "--msg-size", "64", "--sack-every", "1", "--rto", "50ms", "--duration", "1s"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &Engine{cfg: cfg, sock: sock, ep: &link.Endpoint{SrcIPv6: local, SrcMAC: net.HardwareAddr{2, 0, 0, 0, 0, 1}}, stats: NewStats("send"), paths: cfg.SRv6Paths, dstMAC: make(map[netip.Addr]net.HardwareAddr), sel: pattern.New(cfg)}
+	}
+	ea := makeEngine(a, b, "5f00:0:500:301::43,5f00:0:600:301::43", sa)
+	eb := makeEngine(b, a, "5f00:0:500:300::42,5f00:0:600:300::42", sb)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 2)
+	go func() { done <- ea.RunContext(ctx) }()
+	go func() { done <- eb.RunContext(ctx) }()
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, e := range []*Engine{ea, eb} {
+		if e.stats.BytesAcked.Load() == 0 || e.stats.PacketsRecv.Load() == 0 || e.stats.ReverseEVDataUpdates.Load() == 0 {
+			t.Fatal("native bidirectional data/ACK EV feedback did not flow")
 		}
 	}
 }
