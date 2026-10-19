@@ -158,6 +158,11 @@ sudo ./sitg --role send --iface eth1 --proto mrc --encap udp6 \
   --srv6-paths 5f00:0:100:302::,5f00:0:101:302:: --rate 1pps --duration 60s
 ```
 
+The separate proposed design [Encapsulated SRv6 Path Steering with Local
+Decapsulation Fallback](docs/srv6-local-fallback-ietf-draft.md) describes
+sender-selected outer paths with route-withdrawal-based recovery through
+ordinary IPv6 routing, illustrated by the FRR/Linux local-fallback lab.
+
 ### Native SRv6 forwarding
 
 `--entropy srv6 --srv6-mode native` implements the packet model in
